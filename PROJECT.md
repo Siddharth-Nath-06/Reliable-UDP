@@ -1,5 +1,15 @@
 # Reliable Data Transfer over UDP
 
+## 0. Common Architecture
+
+### t0: Common Architecture and Infrastructure
+- t0.1: Project structure and module organization
+- t0.2: Common data types and interfaces
+- t0.3: Transport API
+- t0.4: Configuration and shared parameters
+- t0.5: Error handling and status conventions
+- t0.6: Logging and common instrumentation interface
+
 ## 1. File Manager
 
 ### t1: File Manager
