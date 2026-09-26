@@ -47,3 +47,21 @@ Each significant instance of AI use should be documented as a separate case. Tea
 | **Human Changes / Verification** | Trimming of certain fields, modifying descriptions and field uses to suit our use-case better. |
 | **Final Use** | The modified template table to be used when logging cases of AI use. |
 ---
+
+<hr style="border: 2px solid; margin: 32px 0;">
+
+### AI-USE-SN-t0.1-1: Generation of Mermaid Graph in Markdown files
+
+| Field | Details |
+|---|---|
+| **Contributor / Date** | SN - 26-09-2026 |
+| **AI Tool** | Gemini 3.1 Pro |
+| **Purpose** | To convert physically drawn flowchart architecture diagrams to Markdown supported mermaid graph. |
+| **Prompt / Context** | Convert the graphs/flowcharts in the given photos to mermaid graphs for markdown. Make sure to maintain alignment, apply proper color, and ensure the edges/arrows are not tangled. |
+| **Files / Location** | **File:** docs/architecture.md, **Sections:** 2, 3, 4.3, 4.4, 5, 6. |
+| **AI Contribution** | Generated mermaid graphs (Flowchart TD) versions of physically designed architecture diagrams. |
+| **Human Changes / Verification** | Check rendered graph against physically drawn version. |
+| **Final Use** | The Final graph was put in the markdown file. |
+---
+
+<hr style="border: 2px solid; margin: 32px 0;">
