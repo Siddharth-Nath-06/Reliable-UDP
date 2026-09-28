@@ -2,18 +2,7 @@
 
 ## 1. Overview
 
-The system implements reliable file transfer over UDP using interchangeable ARQ protocols. Reliability is provided above UDP through Stop-and-Wait, Go-Back-N, and Selective Repeat protocols.
-
-The architecture separates:
-
-- File management
-- ARQ reliability mechanisms
-- Packet representation
-- Transport interfaces
-- UDP communication
-- Network channel emulation
-- Timeout and RTT estimation
-- Monitoring and experimental analysis
+The system implements reliable file transfer over UDP using interchangeable ARQ protocols. The architecture separates file handling, packet handling, ARQ reliability, transport, channel emulation, timeout estimation, and experiment analysis.
 
 ## 2. Architecture
 
@@ -32,201 +21,267 @@ flowchart TD
 
     A([Driver])
     B[File Manager]
-    C[ARQ Factory]
 
-    D[Stop-and-Wait]
-    E[Go-Back-N]
-    F[Selective Repeat]
+    subgraph PH[Packet Handler]
+        C1[Packet Creator]
+        C2[Packet Verifier]
+        C3[Packet Dewrapper]
+    end
 
-    G[Packet Layer]
-    R[Transport API]
+    D[ARQ Factory]
+    E[Stop-and-Wait]
+    F[Go-Back-N]
+    G[Selective Repeat]
 
-    U1[UDP Sender]
-    U2[UDP Receiver]
+    H[Transport API]
+    I[UDP Transport]
+    J[Channel Emulator]
 
-    H[Channel Emulator]
+    K[Timer Manager]
+    L[RTO Manager]
+    M[Monitoring]
+    N[Experiment Data]
+    O[Analysis and Graphs]
 
-    J[Timer Manager]
-    K[RTO Manager]
-
-    L[RTT Measurement]
-    M[Jacobson/Karels]
-    N[Karn's Algorithm]
-
-    O[Monitoring]
-    P[Experiment Data]
-    Q[Analysis and Graphs]
+    P[File Reconstructor]
 
     A --> B
-    A --> C
+    A --> D
 
-    C --> D
-    C --> E
-    C --> F
-
+    D --> E
+    D --> F
     D --> G
-    E --> G
-    F --> G
 
-    G --> R
+    B --> C1
+    C1 --> E
+    C1 --> F
+    C1 --> G
 
-    R --> U1
-    U1 --> H
-    H --> U2
-    U2 --> R
+    E --> H
+    F --> H
+    G --> H
 
-    D --> J
-    E --> J
-    F --> J
+    H --> I
+    I --> J
+    J --> I
+    I --> H
 
-    D --> K
+    H --> C2
+    C2 --> E
+    C2 --> F
+    C2 --> G
+
+    E --> C3
+    F --> C3
+    G --> C3
+
+    C3 --> P
+
     E --> K
     F --> K
+    G --> K
 
-    K --> L
-    K --> M
-    K --> N
+    E --> L
+    F --> L
+    G --> L
 
-    A --> O
-    D --> O
-    E --> O
-    F --> O
-    H --> O
-    K --> O
+    A --> M
+    E --> M
+    F --> M
+    G --> M
+    J --> M
+    L --> M
 
-    O --> P
-    P --> Q
+    M --> N
+    N --> O
 ```
 
-## 3. Data Flow
+The main architecture shows component relationships. The detailed transfer path is defined by the data-flow diagrams below.
 
-The transfer path between the sender and receiver is:
+## 3. Transfer Lifecycle
+
+The complete transfer progresses through connection establishment, data transfer, acknowledgement exchange, reconstruction, integrity verification, and termination.
 
 ```mermaid
 flowchart TD
 
-    A[Sender]
-    B[File Manager]
-    C[ARQ]
-    D[Packet Layer]
-    E[Transport API]
-    F[UDP Sender]
-    G[Channel Emulator]
-    H[UDP Receiver]
-    I[Transport API]
-    J[Packet Layer]
-    K[ARQ]
-    L[File Manager]
-    M[Receiver]
+    A[Transfer Configuration]
+    B[Connection Established]
+    C[Transfer Metadata Available]
+    D[File Chunks Available]
+    E[Packets Exchanged]
+    F[File Reconstructed]
+    G[File Integrity Verified]
+    H[Connection Terminated]
 
     A --> B
     B --> C
     C --> D
     D --> E
     E --> F
-    F -->|UDP| G
-    G -->|UDP| H
-    H --> I
-    I --> J
-    J --> K
-    K --> L
-    L --> M
+    F --> G
+    G --> H
 ```
 
-The reverse direction follows the same path. ACK packets therefore pass through the Channel Emulator in the same manner as data packets.
+Control packets such as SYN, ACK, NACK, and FIN are exchanged through the same packet and transport path as data packets.
 
-## 4. Module Responsibilities
+## 4. Data Flow
 
-### 4.1 File Manager
+### 4.1 Sender
+
+```mermaid
+flowchart TD
+
+    A[File Manager]
+    B[File Chunk]
+    C[Packet Creator]
+    D[Packet]
+    E[Selected ARQ]
+    F[Configured Packet]
+    G[Transport API]
+    H[UDP Transport]
+    I[Channel Emulator]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+```
+
+
+### 4.2 Receiver
+
+```mermaid
+flowchart TD
+
+    A[UDP Transport]
+    B[Serialized Packet]
+    C[Packet Verifier]
+    D[Verified Packet]
+    E[Selected ARQ]
+    F[Accepted Packet]
+    G[Packet Dewrapper]
+    H[File Payload]
+    I[File Reconstructor]
+
+    A --> B
+    B --> C
+    C --> D
+    D --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+```
+
+The Transport API provides received serialized packet data to the Packet Verifier. The verifier checks the packet checksum. A corrupted packet is not passed to ARQ as trusted packet data.
+
+A verified packet is passed to the selected ARQ implementation. ARQ determines whether the packet is accepted, buffered, or discarded according to the protocol. Only an accepted packet is passed to the Packet Dewrapper, which extracts the file payload for the File Reconstructor.
+
+### 4.3 Control Packet Feedback
+
+```mermaid
+flowchart TD
+
+    A[Receiver ARQ]
+    B[Packet Creator]
+    C[Control Packet]
+    D[Sender ARQ]
+
+    A --> B
+    B --> C
+    C --> D
+```
+
+The receiver ARQ generates ACK, NACK, and connection-control packets through the Packet Creator. The resulting control packet follows the same Transport API, UDP Transport, Channel Emulator, Packet Verifier, and ARQ path in the reverse direction.
+
+The ARQ layer determines when a control packet is required and what protocol information it carries. The Packet Handler defines its packet representation.
+
+## 5. Module Responsibilities
+
+### 5.1 File Manager
 
 Responsible for file-level operations:
 
-- File input and output
-- Data chunking
+- File input
+- File chunking
 - File hashing
-- File reconstruction
-- Final integrity verification
 
-The File Manager does not handle UDP communication or ARQ logic.
+The File Manager produces chunks for transmission and provides file information required for final integrity verification.
 
-### 4.2 ARQ Protocols
+### 5.2 Packet Handler
 
-The ARQ layer provides reliable transfer mechanisms:
+The Packet Handler provides the packet operations required at different stages of transfer.
 
-- Sequence numbering
-- ACK processing
-- Retransmission
-- Window management
-- Duplicate handling
-- Out-of-order handling
-- Protocol-specific reliability logic
+#### Packet Creator
 
-The three implementations share a common ARQ interface:
+- Initializes a packet from a file chunk or control information
+- Provides the packet representation used by ARQ
+- Provides serialization of the configured packet for transmission
+
+#### Packet Verifier
+
+- Checks the packet checksum
+- Rejects corrupted packets
+
+The verifier does not interpret an untrusted sequence or acknowledgement value from a corrupted packet.
+
+#### Packet Dewrapper
+
+- Extracts the payload from an accepted packet
+- Passes recovered file data to the File Reconstructor
+
+The Packet Handler does not implement ARQ behavior, retransmission, or window management.
+
+### 5.3 ARQ Protocols
+
+The selected ARQ implementation controls reliable transfer between the two endpoints:
 
 - Stop-and-Wait
 - Go-Back-N
 - Selective Repeat
 
-The ARQ layer does not directly access UDP sockets.
+ARQ is responsible for:
 
-### 4.3 Packet Layer
+- Configuring protocol-specific packet fields
+- Sequence and acknowledgement handling
+- Window management
+- ACK and NACK handling
+- Retransmission
+- Duplicate and out-of-order handling
+- Protocol state
+- Determining whether a received packet is accepted, buffered, or discarded
 
-Responsible for packet representation and conversion:
+The ARQ layer interacts with the Transport API rather than directly with UDP sockets.
 
-```mermaid
-flowchart TD
+### 5.4 Transport API
 
-    A[Packet Structure]
-    B[Serialized Bytes]
-
-    A <-->|Serialize / Deserialize| B
-```
+The Transport API provides the interface between ARQ and UDP communication.
 
 Responsibilities include:
 
-- Packet field definition
-- Packet construction
-- Serialization
-- Deserialization
-- Checksum generation
-- Checksum verification
-- Malformed packet validation
-- ACK packet representation
+- Sending serialized packets
+- Receiving serialized packets
+- Address management
 
-The Packet Layer does not implement ARQ or sliding-window logic.
-
-### 4.4 Transport API
-
-The Transport API provides the interface between ARQ and the underlying network communication.
-
-```mermaid
-flowchart TD
-
-    A[ARQ]
-    B[Packet Layer]
-    C[Transport API]
-
-    A --> B
-    B --> C
-```
-
-The ARQ implementation interacts with the Transport API rather than directly with UDP socket operations.
-
-### 4.5 UDP Transport
+### 5.5 UDP Transport
 
 UDP Transport is responsible only for UDP communication:
 
 - UDP socket creation
 - Binding
-- Sending serialized packet data
-- Receiving serialized packet data
-- Address management
+- Sending bytes
+- Receiving bytes
 
-It does not implement reliability, retransmission, packet sequencing, or timeout estimation.
+It does not implement reliability, sequencing, retransmission, or timeout estimation.
 
-### 4.6 Channel Emulator
+### 5.6 Channel Emulator
 
-The Channel Emulator acts as an intermediary between the sender and receiver.
+The Channel Emulator acts as an intermediary between the two UDP endpoints.
 
 ```mermaid
 flowchart TD
@@ -235,8 +290,8 @@ flowchart TD
     B[Channel Emulator]
     C[UDP Receiver]
 
-    A -->|UDP| B
-    B -->|UDP| C
+    A -->|UDP Datagram| B
+    B -->|UDP Datagram| C
 ```
 
 It can introduce controlled network conditions:
@@ -248,11 +303,11 @@ It can introduce controlled network conditions:
 - Network delay
 - Delay jitter
 
-The emulator operates on packets transmitted through UDP and is independent of ARQ protocol logic.
+The same channel conditions apply to reverse-direction control packets.
 
-### 4.7 Timer Manager
+### 5.7 Timer Manager
 
-Provides timer functionality required by ARQ protocols:
+Provides timer functionality required by the ARQ protocols:
 
 - Timer creation
 - Timer start
@@ -262,11 +317,9 @@ Provides timer functionality required by ARQ protocols:
 
 Timer behavior may differ between Stop-and-Wait, Go-Back-N, and Selective Repeat.
 
-### 4.8 RTO Manager
+### 5.8 RTO Manager
 
-Provides adaptive retransmission timeout estimation.
-
-Responsibilities include:
+Provides adaptive retransmission timeout estimation:
 
 - RTT measurement
 - Jacobson/Karels estimation
@@ -274,35 +327,19 @@ Responsibilities include:
 - Karn's algorithm
 - RTO state management
 
-The ARQ protocols use the RTO Manager to obtain current timeout values.
+The ARQ protocols use the RTO Manager to obtain retransmission timeout values.
 
-## 5. Timing Architecture
+### 5.9 File Reconstructor
 
-```mermaid
-flowchart TD
+Responsible for receiver-side file reconstruction:
 
-    A[ARQ]
+- Accepting file payloads from the Packet Dewrapper
+- Ordering and writing received file data according to transfer state
+- Final file integrity verification
 
-    B[Timer Manager]
-    C[RTO Manager]
+### 5.10 Monitoring and Analysis
 
-    D[RTT Measurement]
-    E[Jacobson/Karels]
-    F[Karn's Algorithm]
-
-    A --> B
-    A --> C
-
-    C --> D
-    C --> E
-    C --> F
-```
-
-The Timer Manager handles timer operation, while the RTO Manager determines the appropriate retransmission timeout.
-
-## 6. Observability
-
-Runtime components produce monitoring data for experimental analysis.
+Runtime components produce monitoring data for experiments.
 
 ```mermaid
 flowchart TD
@@ -310,7 +347,6 @@ flowchart TD
     A[ARQ]
     B[Channel Emulator]
     C[RTO Manager]
-
     D[Monitoring]
     E[Experiment Data]
     F[Analysis and Graphs]
@@ -318,7 +354,6 @@ flowchart TD
     A --> D
     B --> D
     C --> D
-
     D --> E
     E --> F
 ```
@@ -334,11 +369,36 @@ Relevant measurements include:
 - Bytes transferred
 - Goodput
 
+## 6. Timing Architecture
+
+```mermaid
+flowchart TD
+
+    A[Selected ARQ]
+    B[Timer Manager]
+    C[RTO Manager]
+    D[RTT Measurement]
+    E[Jacobson/Karels]
+    F[Karn's Algorithm]
+
+    A --> B
+    A --> C
+    C --> D
+    C --> E
+    C --> F
+```
+
+The Timer Manager handles timer operation. The RTO Manager determines retransmission timeout values from RTT measurements and applies the selected estimation rules.
+
 ## 7. Architectural Principles
 
-1. ARQ is transport-independent.
-2. Packet representation is independent of ARQ logic.
-3. UDP provides datagram transport only.
-4. The Channel Emulator is an independent network intermediary.
-5. Timers and RTO estimation are separate services.
-6. Experiment analysis operates on collected runtime data.
+1. File handling is separate from packet and ARQ logic.
+2. Packet creation, verification, and payload extraction are separate from ARQ behavior.
+3. ARQ controls reliable transfer and protocol-specific packet fields.
+4. The Packet Handler represents and serializes packets and validates received packet checksums.
+5. Corrupted packet contents are not treated as trusted input to ARQ.
+6. Transport provides UDP communication only.
+7. The Channel Emulator is an independent network intermediary.
+8. Timers and RTO estimation are separate services used by ARQ.
+9. File reconstruction and final integrity verification occur at the receiver.
+10. Monitoring and analysis do not determine protocol behavior.
