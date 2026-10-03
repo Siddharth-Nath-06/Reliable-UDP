@@ -1,0 +1,21 @@
+#ifndef COMMON_CONSTANTS_H
+#define COMMON_CONSTANTS_H
+
+#define PACKET_HEADER_SIZE 7
+#define MAX_PAYLOAD_SIZE 1024
+
+#define FLAG_DATA   0x01
+#define FLAG_ACK    0x02
+#define FLAG_NACK   0x04
+#define FLAG_SYN    0x08
+#define FLAG_FIN    0x10
+#define FLAG_WINDOW 0x20
+
+#define FLAG_PROTOCOL_MASK 0xC0
+
+#define PROTOCOL_STOP_WAIT        0x00
+#define PROTOCOL_GO_BACK_N        0x40
+#define PROTOCOL_SELECTIVE_REPEAT 0x80
+#define PROTOCOL_RESERVED         0xC0
+
+#endif
