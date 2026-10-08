@@ -116,3 +116,75 @@ uint64_t file_manager_get_size(
 
     return fm->file_size;
 }
+
+int file_manager_get_sha256(
+    FileManager *fm,
+    SHA256Digest *digest
+)
+{
+    if (fm == NULL || fm->file == NULL || digest == NULL)
+        return -1;
+
+    FILE *file = (FILE *)fm->file;
+
+    long current_position = ftell(file);
+
+    if (current_position < 0)
+        return -1;
+
+    if (fseek(file, 0, SEEK_SET) != 0)
+        return -1;
+
+    SHA256Context context;
+
+    sha256_init(&context);
+
+    uint8_t buffer[4096];
+
+    while (1)
+    {
+        size_t bytes_read = fread(
+            buffer,
+            1,
+            sizeof(buffer),
+            file
+        );
+
+        if (bytes_read > 0)
+        {
+            if (sha256_update(
+                    &context,
+                    buffer,
+                    bytes_read) != 0)
+            {
+                fseek(file, current_position, SEEK_SET);
+                return -1;
+            }
+        }
+
+        if (bytes_read < sizeof(buffer))
+        {
+            if (ferror(file))
+            {
+                fseek(file, current_position, SEEK_SET);
+                return -1;
+            }
+
+            break;
+        }
+    }
+
+    if (sha256_final(&context, digest) != 0)
+    {
+        fseek(file, current_position, SEEK_SET);
+        return -1;
+    }
+
+    /*
+     * Restore the original file-reading position.
+     */
+    if (fseek(file, current_position, SEEK_SET) != 0)
+        return -1;
+
+    return 0;
+}
