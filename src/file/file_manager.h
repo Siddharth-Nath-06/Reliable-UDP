@@ -5,7 +5,9 @@
 #include <stdint.h>
 #include <stddef.h>
 
+
 #include "../common/types.h"
+#include "sha256.h"
 
 /*
  * File Manager
@@ -69,6 +71,20 @@ void file_manager_close(FileManager *fm);
  */
 uint64_t file_manager_get_size(
     const FileManager *fm
+);
+
+/*
+ * Calculate the SHA-256 hash of the complete source file.
+ *
+ * The current file-reading position is preserved.
+ *
+ * Returns:
+ *   0  on success
+ *  -1  on failure
+ */
+int file_manager_get_sha256(
+    FileManager *fm,
+    SHA256Digest *digest
 );
 
 #endif
