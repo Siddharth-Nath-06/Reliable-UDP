@@ -46,7 +46,7 @@ bool packet_serialize(Packet *packet,
                packet->payload,
                packet->payload_length);
 
-    packet->checksum = ~packet_calculate_checksum(buffer, total_size);
+    packet->checksum = (uint16_t)~packet_calculate_checksum(buffer, total_size);
 
     uint16_t checksum = htons(packet->checksum);
 

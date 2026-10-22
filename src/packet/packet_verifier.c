@@ -34,8 +34,26 @@ bool packet_receive(const uint8_t *buffer,
     if (buffer_size != expected_size)
         return true;
 
-    if (packet_calculate_checksum(buffer, buffer_size) != 0xFFFF)
-        return true;
+    // Checksum reverification
+    uint8_t *copy = malloc(buffer_size);
+    if (copy == NULL)
+        return false;
+
+    memcpy(copy, buffer, buffer_size);
+
+    uint16_t received_checksum =
+        ((uint16_t)copy[5] << 8) | copy[6];
+
+    copy[5] = 0;
+    copy[6] = 0;
+
+    uint16_t calculated_checksum =
+        (uint16_t)~packet_calculate_checksum(copy, buffer_size);
+
+    free(copy);
+
+    if (calculated_checksum != received_checksum)
+        return true;  // Malformed/corrupt packet; result remains invalid
 
     Packet packet;
 
