@@ -1,6 +1,12 @@
 #include "packet.h"
+#include <string.h>
 #include "packet_internal.h"
 #include "../common/constants.h"
+#ifdef _WIN32
+    #include <winsock2.h>
+#else
+    #include <arpa/inet.h>
+#endif
 
 bool packet_receive(const uint8_t *buffer,
                     size_t buffer_size,
