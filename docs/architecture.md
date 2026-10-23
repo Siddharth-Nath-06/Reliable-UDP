@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-The system implements reliable file transfer over UDP using interchangeable ARQ protocols. The architecture separates file handling, packet handling, ARQ reliability, transport, channel emulation, timeout estimation, file reconstruction, and experiment analysis.
+The system implements reliable file transfer over UDP using interchangeable ARQ protocols. Either of the two machines can initiate a file transfer, so sender and receiver are roles for a particular transfer rather than permanent machine identities. For each transfer, the machine currently sending the file runs the Channel Emulator locally. The architecture separates file handling, packet handling, ARQ reliability, transport, channel emulation, timeout estimation, file reconstruction, and experiment analysis.
 
 ## 2. Architecture
 
@@ -37,6 +37,7 @@ flowchart TD
     H[Transport API]
     I[UDP Transport]
     J[Channel Emulator]
+    J2[Remote UDP Endpoint]
 
     K[Timer Manager]
     L[RTO Manager]
@@ -68,6 +69,8 @@ flowchart TD
     I --> J
     J --> I
     I --> H
+
+    J --> J2
 
     H --> C3
     C3 --> C2
@@ -103,6 +106,8 @@ flowchart TD
 
 The main architecture shows component relationships. The detailed transfer path is defined by the data-flow diagrams below.
 
+**Transfer-role rule:** Either machine can initiate a transfer. The machine sending the file for that transfer runs its Channel Emulator locally. File data travels from the current sender through that emulator to the current receiver. Return traffic, including ACK and NACK packets, travels back through the same emulator so channel conditions can be applied in both directions. If the transfer direction reverses, the sender, receiver, and location of the Channel Emulator reverse as well.
+
 ## 3. Transfer Lifecycle
 
 The complete transfer progresses through connection establishment, data transfer, acknowledgement exchange, reconstruction, integrity verification, and termination.
@@ -132,7 +137,7 @@ Control packets such as SYN, ACK, NACK, and FIN are exchanged through the same P
 
 ## 4. Data Flow
 
-### 4.1 Sender
+### 4.1 Current Sender
 
 ```mermaid
 flowchart TD
@@ -159,13 +164,13 @@ flowchart TD
     I --> J
 ```
 
-The File Manager provides raw file chunks to the selected ARQ protocol. ARQ determines whether and when a chunk is sent, assigns the required protocol information such as the sequence number and packet type, and requests construction of the corresponding packet.
+The File Manager on the current sender provides raw file chunks to the selected ARQ protocol. ARQ determines whether and when a chunk is sent, assigns the required protocol information such as the sequence number and packet type, and requests construction of the corresponding packet. The sender's UDP Transport sends the serialized datagram to the Channel Emulator running on that same machine.
 
 The Packet Creator constructs the logical packet from the information provided by ARQ. The Packet Serializer converts the packet into the wire-format byte sequence for transmission.
 
 ARQ does not require the File Manager to construct or partially construct protocol packets.
 
-### 4.2 Receiver
+### 4.2 Current Receiver
 
 ```mermaid
 flowchart TD
@@ -194,7 +199,7 @@ flowchart TD
     J --> K
 ```
 
-The Transport API provides received serialized packet data to the Packet Handler. The Packet Serializer deserializes the byte sequence into a packet representation.
+The current receiver's Transport API provides received serialized packet data to the Packet Handler. The Packet Serializer deserializes the byte sequence into a packet representation.
 
 The Packet Verifier checks the packet structure and checksum. A corrupted packet is treated as invalid and its untrusted fields are not used by ARQ.
 
@@ -209,31 +214,31 @@ ARQ is responsible for packet ordering and duplicate handling. The File Reconstr
 ```mermaid
 flowchart TD
 
-    A[Receiver ARQ]
+    A[Current Receiver ARQ]
     B[Packet Creator]
     C[Control Packet]
     D[Packet Serializer]
-    E[Transport API]
-    F[Channel Emulator]
-    G[Sender Transport]
+    E[Receiver Transport]
+    F[Channel Emulator<br/>On current sender's machine]
+    G[Current Sender Transport]
     H[Packet Serializer]
     I[Packet Verifier]
-    J[Sender ARQ]
+    J[Current Sender ARQ]
 
     A --> B
     B --> C
     C --> D
     D --> E
-    E --> F
-    F --> G
+    E -->|UDP to emulator endpoint| F
+    F -->|Forwarded datagram| G
     G --> H
     H --> I
     I --> J
 ```
 
-The receiver ARQ generates ACK, NACK, and connection-control packets through the Packet Creator. The Packet Handler serializes the resulting packet, and the control packet follows the same transport and channel path as data packets.
+The current receiver's ARQ generates ACK, NACK, and connection-control packets through the Packet Creator. The Packet Handler serializes the resulting packet. The receiver sends the control datagram to the Channel Emulator endpoint on the current sender's machine; the emulator applies the configured channel behavior and forwards it to the current sender.
 
-The receiving endpoint deserializes and verifies the control packet before passing it to its ARQ implementation.
+The current sender deserializes and verifies the control packet before passing it to its ARQ implementation.
 
 The ARQ layer determines when a control packet is required and what protocol information it carries. The Packet Handler defines its packet representation and wire format.
 
@@ -310,41 +315,73 @@ ARQ interacts with the Transport API rather than directly with UDP sockets.
 
 The Transport API provides the interface between ARQ and UDP communication.
 
+The Driver initializes the Transport with the local endpoint and configured peer/next-hop endpoint. After initialization, the selected ARQ implementation is the only module that uses the Transport for packet transmission and reception. The Driver closes the Transport when the transfer lifecycle ends.
+
+For the current sender, the peer/next-hop endpoint is the Channel Emulator running locally. For the current receiver, the peer/next-hop endpoint for return control traffic is the Channel Emulator endpoint on the current sender's machine. The Transport does not decide transfer roles or configure channel behavior.
+
 Responsibilities include:
 
 - Sending serialized packets
 - Receiving serialized packets
-- Address management
+- Local endpoint binding
+- Configured next-hop address management
 
-The Transport API does not interpret packet contents or implement reliability.
+The Transport API does not interpret packet contents, emulate network conditions, or implement reliability.
 
 ### 5.5 UDP Transport
 
 UDP Transport is responsible only for UDP communication:
 
 - UDP socket creation
-- Binding
-- Sending bytes
-- Receiving bytes
+- Binding to the configured local endpoint
+- Sending bytes to the configured next-hop endpoint
+- Receiving bytes from UDP
 
-It does not implement reliability, sequencing, retransmission, checksum verification, or timeout estimation.
+The configured next-hop endpoint depends on the transfer role. The current sender sends to its local Channel Emulator. The current receiver sends return traffic to that emulator's reachable endpoint on the current sender's machine. The Channel Emulator forwards datagrams between the two Transport endpoints and applies the configured channel conditions.
+
+It does not implement reliability, sequencing, retransmission, checksum verification, channel emulation, or timeout estimation.
 
 ### 5.6 Channel Emulator
 
-The Channel Emulator acts as an intermediary between the two UDP endpoints.
+The Channel Emulator runs on the **same machine as the current sender** for each file transfer. The sender and receiver are not fixed machine identities: either machine can initiate a transfer, and the emulator's location follows the machine sending the file.
+
+For a transfer from Machine A to Machine B:
 
 ```mermaid
-flowchart TD
+flowchart LR
 
-    A[UDP Sender]
-    B[Channel Emulator]
-    C[UDP Receiver]
+    A[Machine A<br/>Current Sender ARQ]
+    B[Sender UDP Transport]
+    C[Channel Emulator<br/>Machine A]
+    D[Receiver UDP Transport]
+    E[Machine B<br/>Current Receiver ARQ]
 
-    A -->|UDP Datagram| B
-    B -->|UDP Datagram| C
+    A -->|Serialized datagram| B
+    B -->|Local UDP| C
+    C -->|Forwarded UDP| D
+    D --> E
 ```
 
-It can introduce controlled network conditions:
+Return traffic, including ACK and NACK packets, passes through the same emulator in the opposite direction:
+
+```mermaid
+flowchart LR
+
+    A[Machine B<br/>Current Receiver ARQ]
+    B[Receiver UDP Transport]
+    C[Channel Emulator<br/>Machine A]
+    D[Sender UDP Transport]
+    E[Machine A<br/>Current Sender ARQ]
+
+    A --> B
+    B -->|UDP to emulator endpoint on A| C
+    C -->|Forwarded UDP| D
+    D --> E
+```
+
+If Machine B initiates a transfer to Machine A, the arrangement reverses: the Channel Emulator runs on Machine B, and both data and return control traffic pass through that emulator.
+
+The Channel Emulator can introduce controlled network conditions:
 
 - Packet loss
 - Packet duplication
@@ -353,9 +390,9 @@ It can introduce controlled network conditions:
 - Network delay
 - Delay jitter
 
-The same channel conditions apply to reverse-direction control packets.
+The same configured channel conditions apply to traffic in both directions for a transfer. The Channel Emulator does not implement ARQ or retransmission logic.
 
-The Channel Emulator does not implement ARQ or retransmission logic.
+The Channel Emulator therefore exposes or uses the UDP endpoints needed to receive datagrams from the current sender's Transport, forward them to the current receiver's Transport, and route return traffic through the same emulator. The exact emulator configuration and forwarding behavior are outside the Transport module.
 
 ### 5.7 Timer Manager
 
@@ -461,7 +498,7 @@ ARQ uses the resulting timing information to make retransmission decisions.
 5. The Packet Handler represents, validates, and serializes packets but does not determine protocol behavior.
 6. Corrupted packet contents are not treated as trusted input to ARQ.
 7. Transport provides UDP communication only.
-8. The Channel Emulator is an independent network intermediary.
+8. Either machine may be the current sender; the Channel Emulator runs on that machine and applies channel conditions to both data and return control traffic.
 9. Timers and RTO estimation are separate services used by ARQ.
 10. File reconstruction and final integrity verification occur at the receiver after ARQ has handled packet ordering and acceptance.
 11. Monitoring and analysis do not determine protocol behavior.
