@@ -1,4 +1,3 @@
-
 #ifndef ARQ_H
 #define ARQ_H
 
@@ -15,22 +14,40 @@ typedef struct ArqContext ArqContext;
 ArqContext *arq_create(
     ArqProtocol protocol,
     uint16_t window_size,
-    uint64_t timeout_ms
+    uint64_t initial_rto_ms,
+    uint64_t min_rto_ms,
+    uint64_t max_rto_ms
 );
 
 void arq_destroy(ArqContext *arq);
 
-bool arq_send(ArqContext *arq, const Packet *packet, Packet *outgoing);
+bool arq_send(
+    ArqContext *arq,
+    const Packet *packet,
+    Packet *outgoing
+);
 
-bool arq_receive(ArqContext *arq, const Packet *packet);
+bool arq_receive(
+    ArqContext *arq,
+    const Packet *packet
+);
 
-bool arq_get_retransmission(ArqContext *arq, Packet *outgoing);
+bool arq_get_retransmission(
+    ArqContext *arq,
+    Packet *outgoing
+);
 
-bool arq_should_retransmit(ArqContext *arq);
+bool arq_should_retransmit(
+    ArqContext *arq
+);
 
-PacketNumber arq_next_sequence_number(const ArqContext *arq);
+PacketNumber arq_next_sequence_number(
+    const ArqContext *arq
+);
 
-size_t arq_outstanding_count(const ArqContext *arq);
+size_t arq_outstanding_count(
+    const ArqContext *arq
+);
 
 bool arq_receive_data(
     ArqContext *arq,
@@ -38,10 +55,27 @@ bool arq_receive_data(
     Packet *ack
 );
 
-bool arq_get_delivered(ArqContext *arq, Packet *delivered);
+bool arq_get_delivered(
+    ArqContext *arq,
+    Packet *delivered
+);
 
-void arq_packet_release(Packet *packet);
+void arq_packet_release(
+    Packet *packet
+);
 
-PacketNumber arq_expected_receive_number(const ArqContext *arq);
+PacketNumber arq_expected_receive_number(
+    const ArqContext *arq
+);
+
+void arq_record_rtt(
+    ArqContext *arq,
+    uint64_t rtt_ms,
+    bool retransmitted
+);
+
+uint64_t arq_get_rto(
+    const ArqContext *arq
+);
 
 #endif
