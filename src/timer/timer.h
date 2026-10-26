@@ -14,6 +14,8 @@ bool timer_restart(TimerId id, uint64_t duration_ms);
 
 bool timer_cancel(TimerId id);
 
+bool timer_destroy(TimerId id);
+
 bool timer_expired(TimerId id);
 
 #endif

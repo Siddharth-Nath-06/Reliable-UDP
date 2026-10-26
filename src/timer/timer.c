@@ -39,24 +39,24 @@ typedef struct {
 
 
 static Timer timers[MAX_TIMERS];
-static TimerId next_timer_id = 1;
 
 //this function will be used to create a timer for a specific packet
 TimerId timer_create(void)
 {
-    if (next_timer_id > MAX_TIMERS) {
-        return 0;
+    for (TimerId id = 1; id <= MAX_TIMERS; id++) {
+        Timer *timer = &timers[id - 1];
+
+        if (!timer->active) {
+            timer->active = true;
+            timer->running = false;
+            timer->duration_ms = 0;
+            timer->start_time_ms = 0;
+
+            return id;
+        }
     }
 
-    //this means I assign an id and then increment its value
-    TimerId id = next_timer_id++;
-
-    timers[id - 1].active = true;
-    timers[id - 1].running = false;
-    timers[id - 1].duration_ms = 0;
-    timers[id - 1].start_time_ms = 0;
-
-    return id;
+    return 0;
 }
 
 //now this is used to start a specific timer
@@ -138,4 +138,24 @@ bool timer_expired(TimerId id)
     }
 
     return false;
+}
+
+bool timer_destroy(TimerId id)
+{
+    if (id == 0 || id > MAX_TIMERS) {
+        return false;
+    }
+
+    Timer *timer = &timers[id - 1];
+
+    if (!timer->active) {
+        return false;
+    }
+
+    timer->active = false;
+    timer->running = false;
+    timer->duration_ms = 0;
+    timer->start_time_ms = 0;
+
+    return true;
 }
