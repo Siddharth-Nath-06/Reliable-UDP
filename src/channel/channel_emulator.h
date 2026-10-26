@@ -30,7 +30,7 @@ typedef enum {
  * Probabilities are in the range [0.0, 1.0].
  * Bandwidth is shared by both directions.
  */
-typedef struct {
+typedef struct ChannelEmulatorConfig {
     uint32_t bandwidth_bps;
 
     uint32_t delay_ms;
