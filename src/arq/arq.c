@@ -7,6 +7,8 @@
 #include "../common/constants.h"
 #include "../timer/timer.h"
 
+#include "../rto/rto.h"
+
 #define ARQ_DELIVERY_QUEUE_SIZE 128
 
 typedef struct {
@@ -24,7 +26,6 @@ typedef struct {
 struct ArqContext {
     ArqProtocol protocol;
     uint16_t window_size;
-    uint64_t timeout_ms;
     PacketNumber next_sequence_number;
     PacketNumber base_sequence_number;
     size_t outstanding;
@@ -34,6 +35,7 @@ struct ArqContext {
     Packet delivery_queue[ARQ_DELIVERY_QUEUE_SIZE];
     size_t delivery_head;
     size_t delivery_count;
+    RtoEstimator *rto;
 };
 
 static uint8_t protocol_flags(ArqProtocol protocol)
@@ -185,7 +187,9 @@ static bool deliver_in_order(ArqContext *arq)
 ArqContext *arq_create(
     ArqProtocol protocol,
     uint16_t window_size,
-    uint64_t timeout_ms)
+    uint64_t initial_rto_ms,
+    uint64_t min_rto_ms,
+    uint64_t max_rto_ms)
 {
     if (protocol != ARQ_STOP_WAIT &&
         protocol != ARQ_GO_BACK_N &&
@@ -193,13 +197,13 @@ ArqContext *arq_create(
         return NULL;
     }
 
-    if (window_size == 0 || window_size > ARQ_MAX_WINDOW_SIZE ||
-        timeout_ms == 0) {
+    if (window_size == 0 ||
+        window_size > ARQ_MAX_WINDOW_SIZE) {
         return NULL;
     }
 
-    if (protocol == ARQ_STOP_WAIT) {
-        window_size = 1;
+    if (protocol == ARQ_STOP_WAIT && window_size != 1) {
+        return NULL;
     }
 
     ArqContext *arq = calloc(1, sizeof(*arq));
@@ -208,9 +212,19 @@ ArqContext *arq_create(
         return NULL;
     }
 
+    arq->rto = rto_create(
+        initial_rto_ms,
+        min_rto_ms,
+        max_rto_ms
+    );
+
+    if (arq->rto == NULL) {
+        free(arq);
+        return NULL;
+    }
+
     arq->protocol = protocol;
     arq->window_size = window_size;
-    arq->timeout_ms = timeout_ms;
 
     return arq;
 }
@@ -241,6 +255,7 @@ void arq_destroy(ArqContext *arq)
         arq_packet_release(&arq->delivery_queue[i]);
     }
 
+    rto_destroy(arq->rto);
     free(arq);
 }
 
@@ -311,7 +326,7 @@ bool arq_send(
         arq->protocol == ARQ_SELECTIVE_REPEAT ||
         arq->outstanding == 0;
 
-    if (start_timer && !timer_start(timer_id, arq->timeout_ms)) {
+    if (start_timer && !timer_start(timer_id, rto_get(arq->rto))) {
         release_slot(slot);
         return false;
     }
@@ -378,7 +393,7 @@ bool arq_receive(ArqContext *arq, const Packet *packet)
         );
 
         if (oldest != NULL) {
-            timer_restart(oldest->timer_id, arq->timeout_ms);
+            timer_restart(oldest->timer_id, rto_get(arq->rto));
         }
     } else {
         arq->base_sequence_number = arq->next_sequence_number;
@@ -402,7 +417,7 @@ bool arq_should_retransmit(ArqContext *arq)
 
             if (slot->used && timer_expired(slot->timer_id)) {
                 slot->retransmit_pending = true;
-                timer_restart(slot->timer_id, arq->timeout_ms);
+                timer_restart(slot->timer_id, rto_get(arq->rto));
                 expired = true;
             }
         }
@@ -434,7 +449,7 @@ bool arq_should_retransmit(ArqContext *arq)
         oldest->retransmit_pending = true;
     }
 
-    timer_restart(oldest->timer_id, arq->timeout_ms);
+    timer_restart(oldest->timer_id, rto_get(arq->rto));
 
     return true;
 }
@@ -611,4 +626,30 @@ PacketNumber arq_expected_receive_number(const ArqContext *arq)
     }
 
     return arq->expected_receive_number;
+}
+
+void arq_record_rtt(
+    ArqContext *arq,
+    uint64_t rtt_ms,
+    bool retransmitted)
+{
+    if (arq == NULL) {
+        return;
+    }
+
+    rto_update(
+        arq->rto,
+        rtt_ms,
+        retransmitted
+    );
+}
+
+uint64_t arq_get_rto(
+    const ArqContext *arq)
+{
+    if (arq == NULL) {
+        return 0;
+    }
+
+    return rto_get(arq->rto);
 }
