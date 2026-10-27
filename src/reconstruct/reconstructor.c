@@ -84,28 +84,22 @@ int reconstructor_finish(
 {
     if (reconstructor == NULL ||
         expected_digest == NULL ||
-        !reconstructor->active)
+        !reconstructor->active ||
+        reconstructor->file == NULL)
     {
         return -1;
     }
 
-    int result = 0;
+    bool write_failed = reconstructor->failed;
 
-    if (fclose(reconstructor->file) != 0)
-    {
-        result = -1;
-    }
+    int close_result = fclose(reconstructor->file);
 
     reconstructor->file = NULL;
     reconstructor->active = false;
 
-    if (reconstructor->failed)
+    if (write_failed || close_result != 0)
     {
-        return -1;
-    }
-
-    if (result != 0)
-    {
+        reconstructor->failed = true;
         return -1;
     }
 
@@ -115,6 +109,7 @@ int reconstructor_finish(
             &reconstructor->hash,
             &calculated_digest) != 0)
     {
+        reconstructor->failed = true;
         return -1;
     }
 
@@ -128,6 +123,7 @@ int reconstructor_finish(
             expected_digest->data,
             SHA256_DIGEST_SIZE) != 0)
     {
+        reconstructor->failed = true;
         return 1;
     }
 
