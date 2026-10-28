@@ -259,6 +259,7 @@ void arq_destroy(ArqContext *arq)
     free(arq);
 }
 
+
 bool arq_send(
     ArqContext *arq,
     const Packet *packet,
@@ -331,13 +332,17 @@ bool arq_send(
         return false;
     }
 
-    *outgoing = slot->packet;
+    if (!copy_received_packet(&slot->packet, outgoing)) {
+        release_slot(slot);
+        return false;
+    }
 
     arq->next_sequence_number++;
     arq->outstanding++;
 
     return true;
 }
+
 
 bool arq_receive(ArqContext *arq, const Packet *packet)
 {
@@ -454,6 +459,7 @@ bool arq_should_retransmit(ArqContext *arq)
     return true;
 }
 
+
 bool arq_get_retransmission(
     ArqContext *arq,
     Packet *outgoing)
@@ -467,7 +473,10 @@ bool arq_get_retransmission(
             ArqSlot *slot = &arq->slots[i];
 
             if (slot->used && slot->retransmit_pending) {
-                *outgoing = slot->packet;
+                if (!copy_received_packet(&slot->packet, outgoing)) {
+                    return false;
+                }
+
                 slot->retransmit_pending = false;
                 return true;
             }
@@ -483,7 +492,10 @@ bool arq_get_retransmission(
         ArqSlot *slot = find_slot(arq, number);
 
         if (slot != NULL && slot->retransmit_pending) {
-            *outgoing = slot->packet;
+            if (!copy_received_packet(&slot->packet, outgoing)) {
+                return false;
+            }
+
             slot->retransmit_pending = false;
             return true;
         }
@@ -491,6 +503,7 @@ bool arq_get_retransmission(
 
     return false;
 }
+
 
 PacketNumber arq_next_sequence_number(const ArqContext *arq)
 {

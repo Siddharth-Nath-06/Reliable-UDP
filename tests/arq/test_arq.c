@@ -319,6 +319,39 @@ static void test_rto_module(void)
     rto_destroy(rto);
 }
 
+
+static void test_packet_ownership(void)
+{
+    ArqContext *arq = arq_create(
+        ARQ_STOP_WAIT, 1, 1000, 100, 5000
+    );
+    assert(arq != NULL);
+
+    uint8_t payload[] = {'t', 'e', 's', 't'};
+    Packet input = {0};
+    input.flags = FLAG_DATA;
+    input.payload_length = sizeof(payload);
+    input.payload = payload;
+
+    Packet outgoing = {0};
+    assert(arq_send(arq, &input, &outgoing));
+    assert(outgoing.payload != NULL);
+    assert(outgoing.payload != input.payload);
+    assert(memcmp(outgoing.payload, payload, sizeof(payload)) == 0);
+
+    arq_packet_release(&outgoing);
+
+    assert(arq_should_retransmit(arq) == false);
+
+    Packet ack = {0};
+    ack.flags = FLAG_ACK;
+    ack.number = 0;
+    assert(arq_receive(arq, &ack));
+
+    arq_destroy(arq);
+}
+
+
 int main(void)
 {
     test_stop_and_wait_sender();
@@ -334,4 +367,6 @@ int main(void)
 
     puts("All ARQ, receiver, retransmission, RTO and Karn tests passed!");
     return 0;
+
+    test_packet_ownership();
 }
