@@ -65,3 +65,19 @@ Each significant instance of AI use should be documented as a separate case. Tea
 ---
 
 <hr style="border: 2px solid; margin: 32px 0;">
+
+### AI-USE-SN-t2.3.1-0: Understanding of checksum verification logic
+
+| Field | Details |
+|---|---|
+| **Contributor / Date** | SN - 23-10-2026 |
+| **AI Tool** | ChatGPT |
+| **Purpose** | To understand why checksum verification does not check for 0xFFFF |
+| **Prompt / Context** | Check why the test for checksum fails. |
+| **Files / Location** |  src\packet\packet_verifier.c, src\packet\packet_serializer.c, src\packet\packet_checksum.c |
+| **AI Contribution** | Identify the fact that odd offset checksum cannot be checked by checksum of the full packet with existing checksum and checking against 0xFFFF. |
+| **Human Changes / Verification** | Modify the code to accomodate the fact. Recalculate checksum for recieved packets by extracting the checksum and making it zero for calculation. |
+| **Final Use** | The changed concept for verifying using checksum. |
+---
+
+<hr style="border: 2px solid; margin: 32px 0;">
