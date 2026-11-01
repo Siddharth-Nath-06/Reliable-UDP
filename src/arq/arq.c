@@ -13,6 +13,7 @@
 typedef struct {
     bool used;
     bool retransmit_pending;
+    bool timeout_report_pending;
     Packet packet;
     TimerId timer_id;
 } ArqSendSlot;
@@ -646,6 +647,7 @@ bool arq_should_retransmit(ArqContext *arq)
                     slot->timer_id,
                     rto_get(arq->rto))) {
                 slot->retransmit_pending = true;
+                slot->timeout_report_pending = true;
             }
         }
 
@@ -677,6 +679,9 @@ bool arq_should_retransmit(ArqContext *arq)
         return false;
     }
 
+    /* One timeout event for the base timer, including Go-Back-N batches. */
+    base->timeout_report_pending = true;
+
     if (arq->protocol == ARQ_GO_BACK_N) {
         for (uint16_t i = 0; i < arq->outstanding; i++) {
             PacketNumber number =
@@ -693,6 +698,29 @@ bool arq_should_retransmit(ArqContext *arq)
     }
 
     return has_pending_retransmission(arq);
+}
+
+bool arq_get_timeout_event(
+    ArqContext *arq,
+    PacketNumber *number)
+{
+    if (arq == NULL || number == NULL) {
+        return false;
+    }
+
+    for (size_t i = 0; i < ARQ_MAX_WINDOW_SIZE; i++) {
+        ArqSendSlot *slot = &arq->send_slots[i];
+
+        if (!slot->used || !slot->timeout_report_pending) {
+            continue;
+        }
+
+        *number = slot->packet.number;
+        slot->timeout_report_pending = false;
+        return true;
+    }
+
+    return false;
 }
 
 bool arq_get_retransmission(
