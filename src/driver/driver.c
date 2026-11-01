@@ -1,8 +1,17 @@
+#ifndef _WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "driver.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <time.h>
+#endif
 
 #include "../arq/arq.h"
 #include "../common/constants.h"
@@ -53,6 +62,7 @@ typedef struct {
     SHA256Digest expected_digest;
 
     uint64_t bytes_written;
+    uint16_t proposed_window_size;
     uint16_t agreed_window_size;
 
     bool source_eof;
@@ -66,14 +76,18 @@ typedef struct {
 
 static uint64_t driver_now_ms(void)
 {
+#ifdef _WIN32
+    return (uint64_t)GetTickCount64();
+#else
     struct timespec ts;
 
-    if (timespec_get(&ts, TIME_UTC) != TIME_UTC) {
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
         return 0;
     }
 
     return ((uint64_t)ts.tv_sec * 1000U) +
            ((uint64_t)ts.tv_nsec / 1000000U);
+#endif
 }
 
 static bool driver_deadline_expired(const DriverRuntime *runtime)
@@ -487,6 +501,15 @@ static bool driver_create_arq(
     }
 
     runtime->agreed_window_size = window_size;
+
+    if (runtime->monitor != NULL &&
+        runtime->config->role == TRANSPORT_SENDER) {
+        monitor_record_rto(
+            runtime->monitor,
+            arq_get_rto(runtime->arq)
+        );
+    }
+
     return true;
 }
 
@@ -606,14 +629,16 @@ static DriverStatus driver_sender_handshake(DriverRuntime *runtime)
 
             uint8_t type = driver_packet_type(&incoming);
 
-            if (!driver_protocol_matches(runtime, &incoming)) {
-                packet_release_payload(&incoming);
-                return DRIVER_STATUS_PROTOCOL_ERROR;
-            }
-
+            /* A peer using a different protocol still signals rejection
+             * with SYN|NACK|WINDOW. Classify that before protocol matching. */
             if (type == (FLAG_SYN | FLAG_NACK | FLAG_WINDOW)) {
                 packet_release_payload(&incoming);
                 return DRIVER_STATUS_HANDSHAKE_REJECTED;
+            }
+
+            if (!driver_protocol_matches(runtime, &incoming)) {
+                packet_release_payload(&incoming);
+                return DRIVER_STATUS_PROTOCOL_ERROR;
             }
 
             if (type == (FLAG_SYN | FLAG_ACK | FLAG_WINDOW)) {
@@ -727,6 +752,7 @@ static DriverStatus driver_receiver_handshake(DriverRuntime *runtime)
 
         packet_release_payload(&incoming);
 
+        runtime->proposed_window_size = proposed_window;
         uint16_t accepted_window = proposed_window;
 
         if (accepted_window > runtime->config->window_size) {
@@ -799,11 +825,6 @@ static DriverStatus driver_send_retransmissions(
                 runtime->monitor,
                 timed_out_number
             );
-
-            monitor_record_rto(
-                runtime->monitor,
-                arq_get_rto(runtime->arq)
-            );
         }
     }
 
@@ -824,18 +845,19 @@ static DriverStatus driver_send_retransmissions(
             entry->retransmitted = true;
         }
 
-        if (runtime->monitor != NULL) {
-            monitor_record_retransmission(
-                runtime->monitor,
-                packet.number
-            );
-        }
-
+        PacketNumber retransmitted_number = packet.number;
         bool sent = driver_send_packet(runtime, &packet);
         packet_release_payload(&packet);
 
         if (!sent) {
             return DRIVER_STATUS_TRANSPORT_ERROR;
+        }
+
+        if (runtime->monitor != NULL) {
+            monitor_record_retransmission(
+                runtime->monitor,
+                retransmitted_number
+            );
         }
     }
 
@@ -877,6 +899,14 @@ static void driver_process_ack_rtt(
                 elapsed,
                 sample->retransmitted
             );
+
+            if (runtime->config->role == TRANSPORT_SENDER &&
+                !sample->retransmitted) {
+                monitor_record_rto(
+                    runtime->monitor,
+                    arq_get_rto(runtime->arq)
+                );
+            }
         }
     }
 
@@ -1161,10 +1191,52 @@ static DriverStatus driver_receiver_process_data(
     return DRIVER_STATUS_OK;
 }
 
+static bool driver_duplicate_syn_matches(
+    const DriverRuntime *runtime,
+    const Packet *packet)
+{
+    uint64_t file_size = 0;
+    SHA256Digest digest = {0};
+
+    if (packet == NULL ||
+        driver_packet_type(packet) != (FLAG_SYN | FLAG_WINDOW) ||
+        !driver_protocol_matches(runtime, packet) ||
+        packet->number != runtime->proposed_window_size ||
+        !driver_parse_metadata(packet, &file_size, &digest)) {
+        return false;
+    }
+
+    return file_size == runtime->expected_file_size &&
+           memcmp(
+               digest.data,
+               runtime->expected_digest.data,
+               DRIVER_DIGEST_SIZE) == 0;
+}
+
 static DriverStatus driver_receiver_finish(
     DriverRuntime *runtime,
     PacketNumber fin_number)
 {
+    PacketNumber expected_final_number;
+
+    if (runtime->expected_file_size == 0 && runtime->bytes_written == 0) {
+        expected_final_number = UINT16_MAX;
+    } else {
+        expected_final_number = (PacketNumber)(
+            arq_expected_receive_number(runtime->arq) - 1U
+        );
+    }
+
+    if (fin_number != expected_final_number) {
+        /* Tell the peer this FIN cannot complete the active transfer. */
+        (void)driver_send_control(
+            runtime,
+            FLAG_FIN | FLAG_NACK,
+            fin_number
+        );
+        return DRIVER_STATUS_PROTOCOL_ERROR;
+    }
+
     driver_report_progress(
         runtime,
         DRIVER_PHASE_VERIFYING,
@@ -1216,14 +1288,46 @@ static DriverStatus driver_receiver_finish(
         ((uint64_t)runtime->config->max_control_retries + 2U);
 
     uint64_t linger_start = driver_now_ms();
+    bool overall_deadline_hit = false;
 
     while (driver_now_ms() - linger_start < linger_ms) {
+        if (driver_deadline_expired(runtime)) {
+            overall_deadline_hit = true;
+            break;
+        }
+
         Packet duplicate = {0};
+
+        uint64_t now = driver_now_ms();
+        uint64_t linger_elapsed = now - linger_start;
+        uint64_t remaining_linger = linger_ms - linger_elapsed;
+        uint32_t wait_ms = runtime->config->receive_timeout_ms;
+
+        if ((uint64_t)wait_ms > remaining_linger) {
+            wait_ms = (uint32_t)remaining_linger;
+        }
+
+        if (runtime->config->max_transfer_duration_ms != 0) {
+            uint64_t transfer_elapsed = now - runtime->start_time_ms;
+            uint64_t remaining_transfer =
+                transfer_elapsed < runtime->config->max_transfer_duration_ms
+                    ? runtime->config->max_transfer_duration_ms - transfer_elapsed
+                    : 0;
+
+            if ((uint64_t)wait_ms > remaining_transfer) {
+                wait_ms = (uint32_t)remaining_transfer;
+            }
+        }
+
+        if (wait_ms == 0) {
+            overall_deadline_hit = driver_deadline_expired(runtime);
+            break;
+        }
 
         int received = driver_receive_packet(
             runtime,
             &duplicate,
-            runtime->config->receive_timeout_ms
+            wait_ms
         );
 
         if (received < 0) {
@@ -1253,6 +1357,10 @@ static DriverStatus driver_receiver_finish(
         }
 
         packet_release_payload(&duplicate);
+    }
+
+    if (overall_deadline_hit || driver_deadline_expired(runtime)) {
+        return DRIVER_STATUS_TRANSFER_TIMEOUT;
     }
 
     if (finish_status < 0) {
@@ -1319,11 +1427,14 @@ static DriverStatus driver_receiver_transfer(DriverRuntime *runtime)
         }
 
         if (type == (FLAG_SYN | FLAG_WINDOW)) {
-            /*
-             * The sender may retransmit SYN if the handshake
-             * response was lost. Repeat the negotiated response.
-             */
+            /* Only an exact retransmission of the active handshake may
+             * receive the cached response. Never renegotiate mid-transfer. */
+            bool matches = driver_duplicate_syn_matches(runtime, &incoming);
             packet_release_payload(&incoming);
+
+            if (!matches) {
+                return DRIVER_STATUS_PROTOCOL_ERROR;
+            }
 
             if (!driver_send_control(
                     runtime,
@@ -1374,8 +1485,9 @@ static void driver_cleanup(DriverRuntime *runtime)
     }
 
     if (runtime->monitor != NULL) {
-        if (runtime->monitor_started) {
-            (void)monitor_finish(runtime->monitor);
+        if (runtime->monitor_started &&
+            !monitor_finish(runtime->monitor)) {
+            runtime->result->monitor_output_failed = true;
         }
 
         if (runtime->config->event_log_path != NULL &&
