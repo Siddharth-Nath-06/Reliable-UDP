@@ -1,3 +1,22 @@
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0600
+#endif
+
+#ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+#else
+    #include <arpa/inet.h>
+    #include <netdb.h>
+    #include <sys/select.h>
+    #include <sys/socket.h>
+    #include <sys/types.h>
+    #include <unistd.h>
+#endif
+
 #include "transport.h"
 #include "../channel/channel_emulator.h"
 
@@ -7,29 +26,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 
 #ifdef _WIN32
-    #ifndef WIN32_LEAN_AND_MEAN
-        #define WIN32_LEAN_AND_MEAN
-    #endif
-    #include <winsock2.h>
-    #include <ws2tcpip.h>
-
     typedef SOCKET TransportSocket;
     typedef int TransportSocketLength;
-
     #define TRANSPORT_INVALID_SOCKET INVALID_SOCKET
 #else
-    #include <arpa/inet.h>
-    #include <netdb.h>
-    #include <sys/select.h>
-    #include <sys/socket.h>
-    #include <sys/types.h>
-    #include <unistd.h>
-
     typedef int TransportSocket;
     typedef socklen_t TransportSocketLength;
-
     #define TRANSPORT_INVALID_SOCKET (-1)
 #endif
 
@@ -904,10 +909,18 @@ TransportReceiveStatus transport_receive(
 
     /*
      * pthread_cond_timedwait uses an absolute deadline.
-     * TIME_UTC matches the default condition-variable clock.
+     * gettimeofday provides the realtime clock used by the default
+     * condition-variable clock.
      */
-    if (timespec_get(&deadline, TIME_UTC) != TIME_UTC) {
-        return TRANSPORT_RECEIVE_ERROR;
+    {
+        struct timeval realtime;
+
+        if (gettimeofday(&realtime, NULL) != 0) {
+            return TRANSPORT_RECEIVE_ERROR;
+        }
+
+        deadline.tv_sec = realtime.tv_sec;
+        deadline.tv_nsec = (long)realtime.tv_usec * 1000L;
     }
 
     deadline.tv_sec += timeout_ms / 1000U;

@@ -108,7 +108,7 @@ int main(void)
      * Existing test input.
      */
     if (!test_read_chunks(
-            "tests/test_input.txt",
+            "tests/fixtures/test_input.txt",
             10,
             55))
     {
@@ -194,7 +194,7 @@ int main(void)
 
         if (file_manager_open(
                 &fm,
-                "tests/test_input.txt",
+                "tests/fixtures/test_input.txt",
                 0) == 0)
         {
             printf("FAIL: Chunk size 0 should be rejected\n");
@@ -216,7 +216,7 @@ int main(void)
 
         if (file_manager_open(
                 &fm,
-                "tests/test_input.txt",
+                "tests/fixtures/test_input.txt",
                 1025) == 0)
         {
             printf("FAIL: Chunk size 1025 should be rejected\n");
@@ -259,7 +259,7 @@ int main(void)
 
     if (file_manager_open(
             &fm,
-            "tests/test_input.txt",
+            "tests/fixtures/test_input.txt",
             10) != 0)
     {
         printf("FAIL: Could not open file for SHA-256 test\n");
@@ -290,7 +290,7 @@ int main(void)
 
     if (file_manager_open(
             &fm,
-            "tests/test_input.txt",
+            "tests/fixtures/test_input.txt",
             10) != 0)
     {
         printf("FAIL: Could not open file for SHA-256 test\n");
@@ -348,7 +348,7 @@ int main(void)
 
     if (file_manager_open(
             &fm,
-            "tests/test_input.txt",
+            "tests/fixtures/test_input.txt",
             10) != 0)
     {
         printf("FAIL: Could not open file for position test\n");
@@ -356,7 +356,7 @@ int main(void)
     }
     else if (file_manager_open(
                  &reference,
-                 "tests/test_input.txt",
+                 "tests/fixtures/test_input.txt",
                  10) != 0)
     {
         printf("FAIL: Could not open reference file\n");
