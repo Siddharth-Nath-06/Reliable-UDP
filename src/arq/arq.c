@@ -1,12 +1,11 @@
-
 #include "arq.h"
 
 #include <stdlib.h>
 #include <string.h>
 
 #include "../common/constants.h"
+#include "../packet/packet.h"
 #include "../timer/timer.h"
-
 #include "../rto/rto.h"
 
 #define ARQ_DELIVERY_QUEUE_SIZE 128
@@ -16,7 +15,7 @@ typedef struct {
     bool retransmit_pending;
     Packet packet;
     TimerId timer_id;
-} ArqSlot;
+} ArqSendSlot;
 
 typedef struct {
     bool used;
@@ -26,35 +25,144 @@ typedef struct {
 struct ArqContext {
     ArqProtocol protocol;
     uint16_t window_size;
+
     PacketNumber next_sequence_number;
     PacketNumber base_sequence_number;
     size_t outstanding;
-    ArqSlot slots[ARQ_MAX_WINDOW_SIZE];
+
+    ArqSendSlot send_slots[ARQ_MAX_WINDOW_SIZE];
+
     PacketNumber expected_receive_number;
     ArqReceiveSlot receive_slots[ARQ_MAX_WINDOW_SIZE];
+
     Packet delivery_queue[ARQ_DELIVERY_QUEUE_SIZE];
     size_t delivery_head;
     size_t delivery_count;
+
     RtoEstimator *rto;
 };
+
+/* ---------- Protocol and packet validation ---------- */
 
 static uint8_t protocol_flags(ArqProtocol protocol)
 {
     switch (protocol) {
         case ARQ_STOP_WAIT:
             return PROTOCOL_STOP_WAIT;
+
         case ARQ_GO_BACK_N:
             return PROTOCOL_GO_BACK_N;
+
         case ARQ_SELECTIVE_REPEAT:
             return PROTOCOL_SELECTIVE_REPEAT;
+
         default:
             return PROTOCOL_RESERVED;
     }
 }
 
-static ArqSlot *find_slot(ArqContext *arq, PacketNumber number)
+static uint8_t packet_type_flags(const Packet *packet)
 {
-    ArqSlot *slot = &arq->slots[number % ARQ_MAX_WINDOW_SIZE];
+    return (uint8_t)(
+        packet->flags & (uint8_t)~FLAG_PROTOCOL_MASK
+    );
+}
+
+static bool packet_protocol_matches(
+    const ArqContext *arq,
+    const Packet *packet)
+{
+    return
+        (packet->flags & FLAG_PROTOCOL_MASK) ==
+        protocol_flags(arq->protocol);
+}
+
+static bool valid_data_packet(
+    const ArqContext *arq,
+    const Packet *packet)
+{
+    return
+        packet != NULL &&
+        packet_type_flags(packet) == FLAG_DATA &&
+        packet_protocol_matches(arq, packet) &&
+        packet->payload_length <= MAX_PAYLOAD_SIZE &&
+        (packet->payload_length == 0 || packet->payload != NULL);
+}
+
+static bool valid_control_packet(
+    const ArqContext *arq,
+    const Packet *packet)
+{
+    if (packet == NULL ||
+        !packet_protocol_matches(arq, packet)) {
+        return false;
+    }
+
+    uint8_t type = packet_type_flags(packet);
+
+    return
+        (type == FLAG_ACK || type == FLAG_NACK) &&
+        packet->payload_length == 0 &&
+        packet->payload == NULL;
+}
+
+/*
+ * Deep-copy a Packet.
+ *
+ * Destination is assigned only after allocation succeeds.
+ * Destination must be empty; this helper does not release any
+ * previous destination payload.
+ */
+static bool copy_packet(
+    const Packet *source,
+    Packet *destination)
+{
+    if (source == NULL || destination == NULL ||
+        source->payload_length > MAX_PAYLOAD_SIZE ||
+        (source->payload_length > 0 &&
+         source->payload == NULL)) {
+        return false;
+    }
+
+    Packet copy = *source;
+    copy.payload = NULL;
+
+    if (source->payload_length > 0) {
+        copy.payload = malloc(source->payload_length);
+
+        if (copy.payload == NULL) {
+            return false;
+        }
+
+        memcpy(
+            copy.payload,
+            source->payload,
+            source->payload_length
+        );
+    }
+
+    *destination = copy;
+    return true;
+}
+
+void arq_packet_release(Packet *packet)
+{
+    if (packet == NULL) {
+        return;
+    }
+
+    packet_release_payload(packet);
+    memset(packet, 0, sizeof(*packet));
+}
+
+/* ---------- Sender and receiver slots ---------- */
+
+static ArqSendSlot *find_send_slot(
+    ArqContext *arq,
+    PacketNumber number)
+{
+    ArqSendSlot *slot =
+        &arq->send_slots[number % ARQ_MAX_WINDOW_SIZE];
 
     if (slot->used && slot->packet.number == number) {
         return slot;
@@ -63,103 +171,87 @@ static ArqSlot *find_slot(ArqContext *arq, PacketNumber number)
     return NULL;
 }
 
-static void release_slot(ArqSlot *slot)
+static const ArqSendSlot *find_send_slot_const(
+    const ArqContext *arq,
+    PacketNumber number)
+{
+    const ArqSendSlot *slot =
+        &arq->send_slots[number % ARQ_MAX_WINDOW_SIZE];
+
+    if (slot->used && slot->packet.number == number) {
+        return slot;
+    }
+
+    return NULL;
+}
+
+static void release_send_slot(ArqSendSlot *slot)
 {
     if (slot == NULL || !slot->used) {
         return;
     }
 
-    timer_cancel(slot->timer_id);
-    timer_destroy(slot->timer_id);
-    free(slot->packet.payload);
+    if (slot->timer_id != 0) {
+        /*
+         * Cancellation can fail if the timer is already stopped.
+         * Destroy is still attempted to release its slot.
+         */
+        (void)timer_cancel(slot->timer_id);
+        (void)timer_destroy(slot->timer_id);
+    }
+
+    arq_packet_release(&slot->packet);
     memset(slot, 0, sizeof(*slot));
 }
 
-static void discard_receive_slot(ArqReceiveSlot *slot)
+static void release_receive_slot(ArqReceiveSlot *slot)
 {
     if (slot == NULL || !slot->used) {
         return;
     }
 
-    free(slot->packet.payload);
+    arq_packet_release(&slot->packet);
     memset(slot, 0, sizeof(*slot));
 }
 
-static bool has_pending_retransmission(const ArqContext *arq)
-{
-    for (size_t i = 0; i < ARQ_MAX_WINDOW_SIZE; i++) {
-        if (arq->slots[i].used &&
-            arq->slots[i].retransmit_pending) {
-            return true;
-        }
-    }
+/* ---------- Delivery queue ---------- */
 
-    return false;
-}
-
-static void advance_base(ArqContext *arq)
-{
-    while (arq->base_sequence_number != arq->next_sequence_number &&
-           find_slot(arq, arq->base_sequence_number) == NULL) {
-        arq->base_sequence_number++;
-    }
-}
-
-static bool queue_received_packet(ArqContext *arq, Packet *packet)
+/*
+ * Move packet ownership to the delivery queue.
+ * On success, packet is reset to zero.
+ */
+static bool enqueue_delivered_packet(
+    ArqContext *arq,
+    Packet *packet)
 {
     if (arq->delivery_count >= ARQ_DELIVERY_QUEUE_SIZE) {
         return false;
     }
 
-    size_t index =
+    size_t tail =
         (arq->delivery_head + arq->delivery_count) %
         ARQ_DELIVERY_QUEUE_SIZE;
 
-    arq->delivery_queue[index] = *packet;
+    arq->delivery_queue[tail] = *packet;
     arq->delivery_count++;
 
-    packet->payload = NULL;
-    packet->payload_length = 0;
+    memset(packet, 0, sizeof(*packet));
 
     return true;
 }
 
-static bool copy_received_packet(
-    const Packet *source,
-    Packet *destination)
-{
-    *destination = *source;
-    destination->payload = NULL;
-
-    if (source->payload_length == 0) {
-        return true;
-    }
-
-    if (source->payload == NULL) {
-        return false;
-    }
-
-    destination->payload = malloc(source->payload_length);
-
-    if (destination->payload == NULL) {
-        return false;
-    }
-
-    memcpy(
-        destination->payload,
-        source->payload,
-        source->payload_length
-    );
-
-    return true;
-}
-
+/*
+ * Move consecutive Selective Repeat receive slots into the
+ * delivery queue. Any packets that cannot be moved because the
+ * queue is full remain safely retained in their receive slots.
+ */
 static bool deliver_in_order(ArqContext *arq)
 {
     for (;;) {
         ArqReceiveSlot *slot =
             &arq->receive_slots[
-                arq->expected_receive_number % ARQ_MAX_WINDOW_SIZE
+                arq->expected_receive_number %
+                ARQ_MAX_WINDOW_SIZE
             ];
 
         if (!slot->used ||
@@ -171,18 +263,103 @@ static bool deliver_in_order(ArqContext *arq)
             return false;
         }
 
-        Packet packet = slot->packet;
-        memset(slot, 0, sizeof(*slot));
-
-        if (!queue_received_packet(arq, &packet)) {
-            slot->used = true;
-            slot->packet = packet;
+        if (!enqueue_delivered_packet(arq, &slot->packet)) {
             return false;
         }
 
+        memset(slot, 0, sizeof(*slot));
         arq->expected_receive_number++;
     }
 }
+
+/* ---------- Sender-window helpers ---------- */
+
+static void advance_send_base(ArqContext *arq)
+{
+    while (arq->base_sequence_number !=
+               arq->next_sequence_number &&
+           find_send_slot(
+               arq,
+               arq->base_sequence_number
+           ) == NULL) {
+        arq->base_sequence_number++;
+    }
+}
+
+static bool has_pending_retransmission(const ArqContext *arq)
+{
+    for (size_t i = 0; i < ARQ_MAX_WINDOW_SIZE; i++) {
+        if (arq->send_slots[i].used &&
+            arq->send_slots[i].retransmit_pending) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/*
+ * Schedule a NACK-triggered retransmission.
+ *
+ * Stop-and-Wait and Selective Repeat retransmit the identified packet.
+ * Go-Back-N retransmits the identified packet and all later outstanding
+ * packets. The Go-Back-N base timer governs the outstanding window.
+ */
+static bool mark_one_for_retransmission(
+    ArqContext *arq,
+    PacketNumber number)
+{
+    ArqSendSlot *slot = find_send_slot(arq, number);
+
+    if (slot == NULL) {
+        return false;
+    }
+
+    if (arq->protocol == ARQ_SELECTIVE_REPEAT ||
+        arq->protocol == ARQ_STOP_WAIT) {
+        if (!timer_restart(
+                slot->timer_id,
+                rto_get(arq->rto))) {
+            return false;
+        }
+
+        slot->retransmit_pending = true;
+        return true;
+    }
+
+    uint16_t distance =
+        (uint16_t)(number - arq->base_sequence_number);
+
+    if ((size_t)distance >= arq->outstanding) {
+        return false;
+    }
+
+    ArqSendSlot *base =
+        find_send_slot(arq, arq->base_sequence_number);
+
+    if (base == NULL ||
+        !timer_restart(
+            base->timer_id,
+            rto_get(arq->rto))) {
+        return false;
+    }
+
+    for (uint16_t i = distance; i < arq->outstanding; i++) {
+        PacketNumber current =
+            (PacketNumber)(arq->base_sequence_number + i);
+
+        ArqSendSlot *current_slot =
+            find_send_slot(arq, current);
+
+        if (current_slot != NULL) {
+            current_slot->retransmit_pending = true;
+        }
+    }
+
+    return true;
+}
+
+/* ---------- Lifecycle ---------- */
 
 ArqContext *arq_create(
     ArqProtocol protocol,
@@ -229,17 +406,6 @@ ArqContext *arq_create(
     return arq;
 }
 
-void arq_packet_release(Packet *packet)
-{
-    if (packet == NULL) {
-        return;
-    }
-
-    free(packet->payload);
-    packet->payload = NULL;
-    packet->payload_length = 0;
-}
-
 void arq_destroy(ArqContext *arq)
 {
     if (arq == NULL) {
@@ -247,8 +413,8 @@ void arq_destroy(ArqContext *arq)
     }
 
     for (size_t i = 0; i < ARQ_MAX_WINDOW_SIZE; i++) {
-        release_slot(&arq->slots[i]);
-        discard_receive_slot(&arq->receive_slots[i]);
+        release_send_slot(&arq->send_slots[i]);
+        release_receive_slot(&arq->receive_slots[i]);
     }
 
     for (size_t i = 0; i < ARQ_DELIVERY_QUEUE_SIZE; i++) {
@@ -259,183 +425,251 @@ void arq_destroy(ArqContext *arq)
     free(arq);
 }
 
+/* ---------- Sender operations ---------- */
 
-bool arq_send(
-    ArqContext *arq,
-    const Packet *packet,
-    Packet *outgoing)
+bool arq_can_send(const ArqContext *arq)
 {
-    if (arq == NULL || packet == NULL || outgoing == NULL) {
+    if (arq == NULL ||
+        arq->outstanding >= arq->window_size) {
         return false;
     }
 
-    if ((packet->flags & FLAG_DATA) == 0 ||
-        packet->payload_length > MAX_PAYLOAD_SIZE ||
-        (packet->payload_length > 0 && packet->payload == NULL)) {
-        return false;
-    }
-
-    uint16_t sequence_span =
-        (uint16_t)(arq->next_sequence_number -
-                   arq->base_sequence_number);
+    uint16_t sequence_span = (uint16_t)(
+        arq->next_sequence_number -
+        arq->base_sequence_number
+    );
 
     if (sequence_span >= arq->window_size) {
         return false;
     }
 
-    PacketNumber number = arq->next_sequence_number;
-    ArqSlot *slot = &arq->slots[number % ARQ_MAX_WINDOW_SIZE];
+    return find_send_slot_const(
+        arq,
+        arq->next_sequence_number
+    ) == NULL;
+}
 
-    if (slot->used) {
+bool arq_send(
+    ArqContext *arq,
+    const FileChunk *chunk,
+    Packet *outgoing)
+{
+    if (arq == NULL || chunk == NULL || outgoing == NULL ||
+        chunk->length > MAX_PAYLOAD_SIZE ||
+        (chunk->length > 0 && chunk->data == NULL) ||
+        !arq_can_send(arq)) {
+        return false;
+    }
+
+    PacketNumber number = arq->next_sequence_number;
+
+    uint8_t flags = (uint8_t)(
+        FLAG_DATA | protocol_flags(arq->protocol)
+    );
+
+    Packet stored = {0};
+    Packet transmission = {0};
+
+    /*
+     * Construct the logical DATA packet with Packet Creator.
+     * This copies the chunk, so the caller can release its FileChunk
+     * once arq_send() has completed successfully.
+     */
+    if (!packet_create_data(
+            &stored,
+            flags,
+            number,
+            chunk)) {
+        arq_packet_release(&stored);
+        return false;
+    }
+
+    /*
+     * ARQ keeps its own copy and gives the Driver a separate copy.
+     * The Driver can serialize and release its copy independently.
+     */
+    if (!copy_packet(&stored, &transmission)) {
+        arq_packet_release(&stored);
         return false;
     }
 
     TimerId timer_id = timer_create();
 
     if (timer_id == 0) {
+        arq_packet_release(&stored);
+        arq_packet_release(&transmission);
         return false;
     }
 
-    Packet stored = *packet;
-    stored.number = number;
-    stored.flags =
-        (uint8_t)((stored.flags & ~FLAG_PROTOCOL_MASK) |
-                  protocol_flags(arq->protocol));
-    stored.payload = NULL;
+    bool should_start_timer =
+        arq->protocol == ARQ_SELECTIVE_REPEAT ||
+        arq->outstanding == 0;
 
-    if (packet->payload_length > 0) {
-        stored.payload = malloc(packet->payload_length);
-
-        if (stored.payload == NULL) {
-            timer_destroy(timer_id);
-            return false;
-        }
-
-        memcpy(
-            stored.payload,
-            packet->payload,
-            packet->payload_length
-        );
+    if (should_start_timer &&
+        !timer_start(timer_id, rto_get(arq->rto))) {
+        (void)timer_destroy(timer_id);
+        arq_packet_release(&stored);
+        arq_packet_release(&transmission);
+        return false;
     }
+
+    ArqSendSlot *slot =
+        &arq->send_slots[number % ARQ_MAX_WINDOW_SIZE];
 
     slot->used = true;
     slot->retransmit_pending = false;
     slot->packet = stored;
     slot->timer_id = timer_id;
 
-    bool start_timer =
-        arq->protocol == ARQ_SELECTIVE_REPEAT ||
-        arq->outstanding == 0;
-
-    if (start_timer && !timer_start(timer_id, rto_get(arq->rto))) {
-        release_slot(slot);
-        return false;
-    }
-
-    if (!copy_received_packet(&slot->packet, outgoing)) {
-        release_slot(slot);
-        return false;
-    }
-
     arq->next_sequence_number++;
     arq->outstanding++;
+
+    *outgoing = transmission;
 
     return true;
 }
 
-
-bool arq_receive(ArqContext *arq, const Packet *packet)
+/*
+ * Process an ACK or NACK received by the sender.
+ *
+ * For cumulative ACK protocols, the ACK number identifies the
+ * highest sequence number acknowledged.
+ */
+bool arq_receive(
+    ArqContext *arq,
+    const Packet *packet)
 {
-    if (arq == NULL || packet == NULL ||
-        (packet->flags & FLAG_ACK) == 0) {
+    if (arq == NULL ||
+        !valid_control_packet(arq, packet)) {
         return false;
     }
 
-    PacketNumber acknowledged = packet->number;
+    uint8_t type = packet_type_flags(packet);
+    PacketNumber number = packet->number;
 
+    if (type == FLAG_NACK) {
+        return mark_one_for_retransmission(arq, number);
+    }
+
+    /* Selective Repeat: individual ACKs. */
     if (arq->protocol == ARQ_SELECTIVE_REPEAT) {
-        ArqSlot *slot = find_slot(arq, acknowledged);
+        ArqSendSlot *slot = find_send_slot(arq, number);
 
         if (slot == NULL) {
             return false;
         }
 
-        release_slot(slot);
+        release_send_slot(slot);
         arq->outstanding--;
-        advance_base(arq);
+
+        advance_send_base(arq);
 
         return true;
     }
 
-    uint16_t distance =
-        (uint16_t)(acknowledged - arq->base_sequence_number);
-
-    if (arq->outstanding == 0 || distance >= arq->outstanding) {
+    /* Stop-and-Wait and Go-Back-N: cumulative ACKs. */
+    if (arq->outstanding == 0) {
         return false;
     }
 
-    size_t acknowledged_count = (size_t)distance + 1;
+    uint16_t distance =
+        (uint16_t)(number - arq->base_sequence_number);
 
-    for (size_t i = 0; i < acknowledged_count; i++) {
-        PacketNumber number =
+    if ((size_t)distance >= arq->outstanding) {
+        return false;
+    }
+
+    size_t ack_count = (size_t)distance + 1;
+
+    for (size_t i = 0; i < ack_count; i++) {
+        PacketNumber current =
             (PacketNumber)(arq->base_sequence_number + i);
 
-        ArqSlot *slot = find_slot(arq, number);
+        ArqSendSlot *slot = find_send_slot(arq, current);
 
         if (slot != NULL) {
-            release_slot(slot);
+            release_send_slot(slot);
             arq->outstanding--;
         }
     }
 
     arq->base_sequence_number =
-        (PacketNumber)(acknowledged + 1);
+        (PacketNumber)(number + 1);
 
-    if (arq->outstanding > 0) {
-        ArqSlot *oldest = find_slot(
-            arq,
-            arq->base_sequence_number
+    if (arq->outstanding == 0) {
+        arq->base_sequence_number =
+            arq->next_sequence_number;
+
+        return true;
+    }
+
+    /*
+     * For Go-Back-N, the next base's timer may have been created
+     * but not started yet. timer_restart supports both states.
+     */
+    ArqSendSlot *base =
+        find_send_slot(arq, arq->base_sequence_number);
+
+    if (base != NULL) {
+        (void)timer_restart(
+            base->timer_id,
+            rto_get(arq->rto)
         );
-
-        if (oldest != NULL) {
-            timer_restart(oldest->timer_id, rto_get(arq->rto));
-        }
-    } else {
-        arq->base_sequence_number = arq->next_sequence_number;
     }
 
     return true;
 }
 
+/* ---------- Timeout and retransmission operations ---------- */
+
 bool arq_should_retransmit(ArqContext *arq)
 {
-    if (arq == NULL || arq->outstanding == 0 ||
-        has_pending_retransmission(arq)) {
+    if (arq == NULL || arq->outstanding == 0) {
         return false;
     }
 
     if (arq->protocol == ARQ_SELECTIVE_REPEAT) {
-        bool expired = false;
+        bool found_expired = false;
 
         for (size_t i = 0; i < ARQ_MAX_WINDOW_SIZE; i++) {
-            ArqSlot *slot = &arq->slots[i];
+            ArqSendSlot *slot = &arq->send_slots[i];
 
-            if (slot->used && timer_expired(slot->timer_id)) {
+            if (!slot->used ||
+                !timer_expired(slot->timer_id)) {
+                continue;
+            }
+
+            if (timer_restart(
+                    slot->timer_id,
+                    rto_get(arq->rto))) {
                 slot->retransmit_pending = true;
-                timer_restart(slot->timer_id, rto_get(arq->rto));
-                expired = true;
+                found_expired = true;
             }
         }
 
-        return expired;
+        return found_expired;
     }
 
-    ArqSlot *oldest = find_slot(
-        arq,
-        arq->base_sequence_number
-    );
+    /*
+     * Stop-and-Wait and Go-Back-N use one timer for the current base.
+     * Do not schedule a second timeout while the current retransmission
+     * batch is still pending.
+     */
+    if (has_pending_retransmission(arq)) {
+        return false;
+    }
 
-    if (oldest == NULL || !timer_expired(oldest->timer_id)) {
+    ArqSendSlot *base =
+        find_send_slot(arq, arq->base_sequence_number);
+
+    if (base == NULL ||
+        !timer_expired(base->timer_id)) {
+        return false;
+    }
+
+    if (!timer_restart(
+            base->timer_id,
+            rto_get(arq->rto))) {
         return false;
     }
 
@@ -444,21 +678,18 @@ bool arq_should_retransmit(ArqContext *arq)
             PacketNumber number =
                 (PacketNumber)(arq->base_sequence_number + i);
 
-            ArqSlot *slot = find_slot(arq, number);
+            ArqSendSlot *slot = find_send_slot(arq, number);
 
             if (slot != NULL) {
                 slot->retransmit_pending = true;
             }
         }
     } else {
-        oldest->retransmit_pending = true;
+        base->retransmit_pending = true;
     }
-
-    timer_restart(oldest->timer_id, rto_get(arq->rto));
 
     return true;
 }
-
 
 bool arq_get_retransmission(
     ArqContext *arq,
@@ -468,83 +699,122 @@ bool arq_get_retransmission(
         return false;
     }
 
+    /*
+     * Selective Repeat scans the current sequence window in order,
+     * allowing independent retransmission of pending packets.
+     */
     if (arq->protocol == ARQ_SELECTIVE_REPEAT) {
-        for (size_t i = 0; i < ARQ_MAX_WINDOW_SIZE; i++) {
-            ArqSlot *slot = &arq->slots[i];
+        for (uint16_t i = 0; i < arq->window_size; i++) {
+            PacketNumber number =
+                (PacketNumber)(arq->base_sequence_number + i);
 
-            if (slot->used && slot->retransmit_pending) {
-                if (!copy_received_packet(&slot->packet, outgoing)) {
-                    return false;
-                }
+            ArqSendSlot *slot = find_send_slot(arq, number);
 
-                slot->retransmit_pending = false;
-                return true;
+            if (slot == NULL ||
+                !slot->retransmit_pending) {
+                continue;
             }
+
+            Packet copy = {0};
+
+            if (!copy_packet(&slot->packet, &copy)) {
+                return false;
+            }
+
+            *outgoing = copy;
+            slot->retransmit_pending = false;
+
+            return true;
         }
 
         return false;
     }
 
+    /* Stop-and-Wait and Go-Back-N return pending packets in order. */
     for (uint16_t i = 0; i < arq->outstanding; i++) {
         PacketNumber number =
             (PacketNumber)(arq->base_sequence_number + i);
 
-        ArqSlot *slot = find_slot(arq, number);
+        ArqSendSlot *slot = find_send_slot(arq, number);
 
-        if (slot != NULL && slot->retransmit_pending) {
-            if (!copy_received_packet(&slot->packet, outgoing)) {
-                return false;
-            }
-
-            slot->retransmit_pending = false;
-            return true;
+        if (slot == NULL ||
+            !slot->retransmit_pending) {
+            continue;
         }
+
+        Packet copy = {0};
+
+        if (!copy_packet(&slot->packet, &copy)) {
+            return false;
+        }
+
+        *outgoing = copy;
+        slot->retransmit_pending = false;
+
+        return true;
     }
 
     return false;
 }
 
+/* ---------- State accessors and RTO ---------- */
 
 PacketNumber arq_next_sequence_number(const ArqContext *arq)
 {
-    if (arq == NULL) {
-        return 0;
-    }
-
-    return arq->next_sequence_number;
+    return arq == NULL ? 0 : arq->next_sequence_number;
 }
 
 size_t arq_outstanding_count(const ArqContext *arq)
 {
-    if (arq == NULL) {
-        return 0;
-    }
-
-    return arq->outstanding;
+    return arq == NULL ? 0 : arq->outstanding;
 }
+
+PacketNumber arq_expected_receive_number(const ArqContext *arq)
+{
+    return arq == NULL ? 0 : arq->expected_receive_number;
+}
+
+void arq_record_rtt(
+    ArqContext *arq,
+    uint64_t rtt_ms,
+    bool retransmitted)
+{
+    if (arq != NULL) {
+        rto_update(
+            arq->rto,
+            rtt_ms,
+            retransmitted
+        );
+    }
+}
+
+uint64_t arq_get_rto(const ArqContext *arq)
+{
+    return arq == NULL ? 0 : rto_get(arq->rto);
+}
+
+/* ---------- Receiver operations ---------- */
 
 bool arq_receive_data(
     ArqContext *arq,
     const Packet *incoming,
     Packet *ack)
 {
-    if (arq == NULL || incoming == NULL || ack == NULL) {
+    if (arq == NULL || incoming == NULL || ack == NULL ||
+        !valid_data_packet(arq, incoming)) {
         return false;
     }
 
-    if ((incoming->flags & FLAG_DATA) == 0 ||
-        incoming->payload_length > MAX_PAYLOAD_SIZE ||
-        (incoming->payload_length > 0 && incoming->payload == NULL)) {
-        return false;
-    }
-
-    memset(ack, 0, sizeof(*ack));
-    ack->flags =
-        (uint8_t)(FLAG_ACK | protocol_flags(arq->protocol));
+    Packet generated_ack = {0};
 
     PacketNumber number = incoming->number;
     PacketNumber expected = arq->expected_receive_number;
 
+    /*
+     * Stop-and-Wait and Go-Back-N deliver only in-order packets.
+     * Out-of-order and duplicate packets trigger the last cumulative
+     * ACK, allowing the sender to recover from lost ACKs.
+     */
     if (arq->protocol == ARQ_STOP_WAIT ||
         arq->protocol == ARQ_GO_BACK_N) {
         if (number == expected) {
@@ -554,11 +824,11 @@ bool arq_receive_data(
 
             Packet copy = {0};
 
-            if (!copy_received_packet(incoming, &copy)) {
+            if (!copy_packet(incoming, &copy)) {
                 return false;
             }
 
-            if (!queue_received_packet(arq, &copy)) {
+            if (!enqueue_delivered_packet(arq, &copy)) {
                 arq_packet_release(&copy);
                 return false;
             }
@@ -566,46 +836,90 @@ bool arq_receive_data(
             arq->expected_receive_number++;
         }
 
-        ack->number = (PacketNumber)(arq->expected_receive_number - 1);
+        PacketNumber ack_number =
+            (PacketNumber)(arq->expected_receive_number - 1);
+
+        if (!packet_create_control(
+                &generated_ack,
+                (uint8_t)(
+                    FLAG_ACK | protocol_flags(arq->protocol)
+                ),
+                ack_number)) {
+            return false;
+        }
+
+        *ack = generated_ack;
         return true;
     }
 
+    /*
+     * Selective Repeat: accept packets within the receive window.
+     * A successfully buffered packet can be ACKed even if the delivery
+     * queue is full, because the receive slot retains the packet.
+     */
     uint16_t distance = (uint16_t)(number - expected);
 
     if (distance < arq->window_size) {
         ArqReceiveSlot *slot =
-            &arq->receive_slots[number % ARQ_MAX_WINDOW_SIZE];
+            &arq->receive_slots[
+                number % ARQ_MAX_WINDOW_SIZE
+            ];
 
         if (!slot->used) {
             Packet copy = {0};
 
-            if (!copy_received_packet(incoming, &copy)) {
+            if (!copy_packet(incoming, &copy)) {
                 return false;
             }
 
             slot->packet = copy;
             slot->used = true;
         } else if (slot->packet.number != number) {
+            /*
+             * Never overwrite a different retained packet occupying
+             * the same receive-slot index.
+             */
             return false;
         }
 
-        ack->number = number;
-        deliver_in_order(arq);
+        (void)deliver_in_order(arq);
 
+        if (!packet_create_control(
+                &generated_ack,
+                (uint8_t)(
+                    FLAG_ACK | protocol_flags(arq->protocol)
+                ),
+                number)) {
+            return false;
+        }
+
+        *ack = generated_ack;
         return true;
     }
 
+    /* Re-ACK an old duplicate within the previous receive window. */
     uint16_t behind = (uint16_t)(expected - number);
 
     if (behind <= arq->window_size) {
-        ack->number = number;
+        if (!packet_create_control(
+                &generated_ack,
+                (uint8_t)(
+                    FLAG_ACK | protocol_flags(arq->protocol)
+                ),
+                number)) {
+            return false;
+        }
+
+        *ack = generated_ack;
         return true;
     }
 
     return false;
 }
 
-bool arq_get_delivered(ArqContext *arq, Packet *delivered)
+bool arq_get_delivered(
+    ArqContext *arq,
+    Packet *delivered)
 {
     if (arq == NULL || delivered == NULL ||
         arq->delivery_count == 0) {
@@ -621,48 +935,14 @@ bool arq_get_delivered(ArqContext *arq, Packet *delivered)
     );
 
     arq->delivery_head =
-        (arq->delivery_head + 1) % ARQ_DELIVERY_QUEUE_SIZE;
+        (arq->delivery_head + 1) %
+        ARQ_DELIVERY_QUEUE_SIZE;
 
     arq->delivery_count--;
 
     if (arq->protocol == ARQ_SELECTIVE_REPEAT) {
-        deliver_in_order(arq);
+        (void)deliver_in_order(arq);
     }
 
     return true;
-}
-
-PacketNumber arq_expected_receive_number(const ArqContext *arq)
-{
-    if (arq == NULL) {
-        return 0;
-    }
-
-    return arq->expected_receive_number;
-}
-
-void arq_record_rtt(
-    ArqContext *arq,
-    uint64_t rtt_ms,
-    bool retransmitted)
-{
-    if (arq == NULL) {
-        return;
-    }
-
-    rto_update(
-        arq->rto,
-        rtt_ms,
-        retransmitted
-    );
-}
-
-uint64_t arq_get_rto(
-    const ArqContext *arq)
-{
-    if (arq == NULL) {
-        return 0;
-    }
-
-    return rto_get(arq->rto);
 }
