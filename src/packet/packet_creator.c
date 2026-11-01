@@ -91,6 +91,19 @@ bool packet_create_control(
     uint8_t flags,
     PacketNumber number)
 {
+    if (packet == NULL) {
+        return false;
+    }
+
+    uint8_t type = (uint8_t)(
+        flags & (uint8_t)~FLAG_PROTOCOL_MASK
+    );
+
+    /* Reject DATA and any combination containing the DATA flag. */
+    if ((type & FLAG_DATA) != 0) {
+        return false;
+    }
+
     return packet_create_control_with_payload(
         packet,
         flags,
