@@ -1,32 +1,26 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include "timer.h"
-#include <windows.h>
 
+#include <pthread.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <limits.h>
 
-//this is a windows api that ive used to check how much time has passed 
-//gives us a reliable way to check how much time has passed 
-static uint64_t get_time_ms(void)
-{
-    static LARGE_INTEGER frequency;
-    static bool initialized = false;
+#ifdef _WIN32
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+#else
+    #include <time.h>
+#endif
 
-    if (!initialized) {
-        QueryPerformanceFrequency(&frequency);
-        initialized = true;
-    }
+#define TIMER_CAPACITY 100U
 
-    LARGE_INTEGER current_time;
-    QueryPerformanceCounter(&current_time);
-
-    // this means numver of ticks divided by the frequency of ticks which
-    //basically tells u how many seconds have elapsed and muliply it by
-    //1000 to convert into milliseconds 1000
-
-    return (uint64_t)(
-        (current_time.QuadPart * 1000) / frequency.QuadPart
-    );
-}
-
-//creatd a structure for our timer
 typedef struct {
     bool active;
     bool running;
@@ -34,17 +28,133 @@ typedef struct {
     uint64_t start_time_ms;
 } Timer;
 
-//this means that there can be at max 100 timers at a time
-#define MAX_TIMERS 100
+static Timer timers[TIMER_CAPACITY];
+
+/* All accesses to the shared timer pool are protected by this mutex. */
+static pthread_mutex_t timer_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 
-static Timer timers[MAX_TIMERS];
+/*
+ * Read a monotonic timestamp in milliseconds.
+ * Returns false rather than silently using an invalid timestamp.
+ *
+ * This helper is called only while timer_mutex is held, so
+ * initialization of the Windows performance-counter frequency
+ * does not race between callers.
+ */
+static bool get_time_ms(uint64_t *result)
+{
+    if (result == NULL) {
+        return false;
+    }
 
-//this function will be used to create a timer for a specific packet
+#ifdef _WIN32
+    static bool frequency_initialized = false;
+    static uint64_t frequency = 0;
+
+    LARGE_INTEGER current;
+
+    if (!frequency_initialized) {
+        LARGE_INTEGER measured_frequency;
+
+        if (!QueryPerformanceFrequency(&measured_frequency) ||
+            measured_frequency.QuadPart <= 0) {
+            return false;
+        }
+
+        frequency = (uint64_t)measured_frequency.QuadPart;
+        frequency_initialized = true;
+    }
+
+    if (!QueryPerformanceCounter(&current) || current.QuadPart < 0) {
+        return false;
+    }
+
+    {
+        uint64_t ticks = (uint64_t)current.QuadPart;
+        uint64_t whole_seconds = ticks / frequency;
+        uint64_t remaining_ticks = ticks % frequency;
+
+        if (whole_seconds > UINT64_MAX / 1000U) {
+            return false;
+        }
+
+        uint64_t whole_ms = whole_seconds * 1000U;
+        uint64_t fractional_ms;
+
+        /*
+         * Avoid multiplying a potentially large tick remainder by
+         * 1000 unless that multiplication is safe.
+         */
+        if (remaining_ticks <= UINT64_MAX / 1000U) {
+            fractional_ms =
+                (remaining_ticks * 1000U) / frequency;
+        } else {
+            long double fraction =
+                ((long double)remaining_ticks * 1000.0L) /
+                (long double)frequency;
+
+            fractional_ms = (uint64_t)fraction;
+        }
+
+        if (UINT64_MAX - whole_ms < fractional_ms) {
+            return false;
+        }
+
+        *result = whole_ms + fractional_ms;
+        return true;
+    }
+
+#else
+    struct timespec current;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &current) != 0 ||
+        current.tv_sec < 0) {
+        return false;
+    }
+
+    {
+        uint64_t seconds = (uint64_t)current.tv_sec;
+
+        if (seconds > UINT64_MAX / 1000U) {
+            return false;
+        }
+
+        uint64_t whole_ms = seconds * 1000U;
+        uint64_t fractional_ms =
+            (uint64_t)current.tv_nsec / 1000000U;
+
+        if (UINT64_MAX - whole_ms < fractional_ms) {
+            return false;
+        }
+
+        *result = whole_ms + fractional_ms;
+        return true;
+    }
+#endif
+}
+
+
+static Timer *find_timer(TimerId id)
+{
+    if (id == 0 || id > TIMER_CAPACITY) {
+        return NULL;
+    }
+
+    return &timers[id - 1U];
+}
+
+
 TimerId timer_create(void)
 {
-    for (TimerId id = 1; id <= MAX_TIMERS; id++) {
-        Timer *timer = &timers[id - 1];
+    TimerId id = 0;
+
+    pthread_mutex_lock(&timer_mutex);
+
+    for (TimerId candidate = 1;
+         candidate <= TIMER_CAPACITY;
+         candidate++) {
+        Timer *timer = &timers[candidate - 1U];
 
         if (!timer->active) {
             timer->active = true;
@@ -52,110 +162,125 @@ TimerId timer_create(void)
             timer->duration_ms = 0;
             timer->start_time_ms = 0;
 
-            return id;
+            id = candidate;
+            break;
         }
     }
 
-    return 0;
+    pthread_mutex_unlock(&timer_mutex);
+    return id;
 }
 
-//now this is used to start a specific timer
+
 bool timer_start(TimerId id, uint64_t duration_ms)
 {
-    if (id == 0 || id > MAX_TIMERS) {
-        return false;
+    bool success = false;
+    uint64_t now_ms;
+    Timer *timer;
+
+    pthread_mutex_lock(&timer_mutex);
+
+    timer = find_timer(id);
+
+    if (timer != NULL &&
+        timer->active &&
+        !timer->running &&
+        get_time_ms(&now_ms)) {
+        timer->duration_ms = duration_ms;
+        timer->start_time_ms = now_ms;
+        timer->running = true;
+        success = true;
     }
 
-    //this I have done so that I dont have to write timers[id-1] everywhgere, the timer that i am referring to is stored in 'timer' 
-    Timer *timer = &timers[id - 1];
-
-    //if its not active (which means not created) or if it is currently running, dont start it 
-    if (!timer->active || timer->running) {
-        return false;
-    }
-
-
-    timer->duration_ms = duration_ms;
-    timer->start_time_ms = get_time_ms();
-    timer->running = true;
-
-    return true;
+    pthread_mutex_unlock(&timer_mutex);
+    return success;
 }
 
 
 bool timer_restart(TimerId id, uint64_t duration_ms)
 {
-    if (id == 0 || id > MAX_TIMERS) {
-        return false;
+    bool success = false;
+    uint64_t now_ms;
+    Timer *timer;
+
+    pthread_mutex_lock(&timer_mutex);
+
+    timer = find_timer(id);
+
+    if (timer != NULL &&
+        timer->active &&
+        get_time_ms(&now_ms)) {
+        timer->duration_ms = duration_ms;
+        timer->start_time_ms = now_ms;
+        timer->running = true;
+        success = true;
     }
 
-    Timer *timer = &timers[id - 1];
-
-    if (!timer->active) {
-        return false;
-    }
-
-    timer->duration_ms = duration_ms;
-    timer->start_time_ms = get_time_ms();
-    timer->running = true;
-
-    return true;
+    pthread_mutex_unlock(&timer_mutex);
+    return success;
 }
+
 
 bool timer_cancel(TimerId id)
 {
-    if (id == 0 || id > MAX_TIMERS) {
-        return false;
+    bool success = false;
+    Timer *timer;
+
+    pthread_mutex_lock(&timer_mutex);
+
+    timer = find_timer(id);
+
+    if (timer != NULL && timer->active && timer->running) {
+        timer->running = false;
+        success = true;
     }
 
-    Timer *timer = &timers[id - 1];
-
-    if (!timer->active || !timer->running) {
-        return false;
-    }
-
-    timer->running = false;
-
-    return true;
+    pthread_mutex_unlock(&timer_mutex);
+    return success;
 }
+
 
 bool timer_expired(TimerId id)
 {
-    if (id == 0 || id > MAX_TIMERS) {
-        return false;
+    bool expired = false;
+    uint64_t now_ms;
+    Timer *timer;
+
+    pthread_mutex_lock(&timer_mutex);
+
+    timer = find_timer(id);
+
+    if (timer != NULL &&
+        timer->active &&
+        timer->running &&
+        get_time_ms(&now_ms) &&
+        now_ms >= timer->start_time_ms) {
+        expired =
+            (now_ms - timer->start_time_ms) >= timer->duration_ms;
     }
 
-    Timer *timer = &timers[id - 1];
-
-    if (!timer->active || !timer->running) {
-        return false;
-    }
-
-    uint64_t current_time_ms = get_time_ms();
-
-    if (current_time_ms - timer->start_time_ms >= timer->duration_ms) {
-        return true;
-    }
-
-    return false;
+    pthread_mutex_unlock(&timer_mutex);
+    return expired;
 }
+
 
 bool timer_destroy(TimerId id)
 {
-    if (id == 0 || id > MAX_TIMERS) {
-        return false;
+    bool success = false;
+    Timer *timer;
+
+    pthread_mutex_lock(&timer_mutex);
+
+    timer = find_timer(id);
+
+    if (timer != NULL && timer->active) {
+        timer->active = false;
+        timer->running = false;
+        timer->duration_ms = 0;
+        timer->start_time_ms = 0;
+        success = true;
     }
 
-    Timer *timer = &timers[id - 1];
-
-    if (!timer->active) {
-        return false;
-    }
-
-    timer->active = false;
-    timer->running = false;
-    timer->duration_ms = 0;
-    timer->start_time_ms = 0;
-
-    return true;
+    pthread_mutex_unlock(&timer_mutex);
+    return success;
 }
