@@ -88,6 +88,15 @@ bool arq_get_retransmission(
  */
 bool arq_should_retransmit(ArqContext *arq);
 
+/*
+ * Retrieve one pending timer-expiration event.
+ *
+ * Each event identifies a packet whose timer expired. Go-Back-N reports
+ * the base packet for each window timeout. Events are consumed when
+ * retrieved; call repeatedly until this function returns false.
+ */
+bool arq_get_timeout_event(ArqContext *arq, PacketNumber *number);
+
 PacketNumber arq_next_sequence_number(const ArqContext *arq);
 
 size_t arq_outstanding_count(const ArqContext *arq);
