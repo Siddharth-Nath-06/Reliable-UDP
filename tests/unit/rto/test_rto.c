@@ -1,7 +1,7 @@
 #include <assert.h>
 #include <stdio.h>
 
-#include "rto.h"
+#include "../../../src/rto/rto.h"
 
 static void test_initial_rto(void)
 {
