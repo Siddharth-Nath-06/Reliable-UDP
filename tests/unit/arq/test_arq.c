@@ -6,8 +6,8 @@
 #include <windows.h>
 
 #include "arq.h"
-#include "../common/constants.h"
-#include "../rto/rto.h"
+#include "../../../src/common/constants.h"
+#include "../../../src/rto/rto.h"
 
 static Packet make_packet(PacketNumber number, const char *text)
 {
