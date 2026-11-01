@@ -628,9 +628,12 @@ bool arq_should_retransmit(ArqContext *arq)
         return false;
     }
 
+    /*
+     * Selective Repeat maintains an independent timer per packet.
+     * Schedule every expired packet, then report whether any
+     * retransmissions are pending.
+     */
     if (arq->protocol == ARQ_SELECTIVE_REPEAT) {
-        bool found_expired = false;
-
         for (size_t i = 0; i < ARQ_MAX_WINDOW_SIZE; i++) {
             ArqSendSlot *slot = &arq->send_slots[i];
 
@@ -643,22 +646,23 @@ bool arq_should_retransmit(ArqContext *arq)
                     slot->timer_id,
                     rto_get(arq->rto))) {
                 slot->retransmit_pending = true;
-                found_expired = true;
             }
         }
 
-        return found_expired;
+        return has_pending_retransmission(arq);
     }
 
     /*
-     * Stop-and-Wait and Go-Back-N use one timer for the current base.
-     * Do not schedule a second timeout while the current retransmission
-     * batch is still pending.
+     * A NACK may already have scheduled retransmissions.
+     * Report them instead of suppressing the retransmission batch.
      */
     if (has_pending_retransmission(arq)) {
-        return false;
+        return true;
     }
 
+    /*
+     * Stop-and-Wait and Go-Back-N use the base packet's timer.
+     */
     ArqSendSlot *base =
         find_send_slot(arq, arq->base_sequence_number);
 
@@ -688,7 +692,7 @@ bool arq_should_retransmit(ArqContext *arq)
         base->retransmit_pending = true;
     }
 
-    return true;
+    return has_pending_retransmission(arq);
 }
 
 bool arq_get_retransmission(

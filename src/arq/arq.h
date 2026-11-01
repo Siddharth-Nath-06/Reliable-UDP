@@ -79,7 +79,12 @@ bool arq_get_retransmission(
 
 /*
  * Detect expired timers and schedule the relevant retransmissions.
- * Does not perform network I/O.
+ *
+ * Returns true when one or more retransmissions are pending,
+ * including retransmissions previously scheduled by a NACK.
+ *
+ * Does not perform network I/O. The caller should drain pending
+ * packets using arq_get_retransmission().
  */
 bool arq_should_retransmit(ArqContext *arq);
 
