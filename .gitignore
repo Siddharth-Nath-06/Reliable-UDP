@@ -1,0 +1,26 @@
+@'
+# Build artifacts
+/build/
+
+# Generated experiment results
+/results/raw/
+/results/summaries/
+/results/logs/
+/results/figures/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Temporary files and logs
+*.log
+*.tmp
+
+# IDE / editor files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+'@ | Set-Content -Encoding utf8 .gitignore
