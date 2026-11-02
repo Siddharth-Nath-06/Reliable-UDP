@@ -151,8 +151,19 @@ static bool parse_protocol(const char *s, ArqProtocol *out)
 
 int main(int argc, char **argv)
 {
-    uint64_t size = 65536, window_arg = 1, seed = 101;
+    uint64_t size = 65536;
+    uint64_t window_arg = 1;
+    uint64_t seed = 101;
+    uint64_t rto_ms = 200;
+    uint64_t delay_ms = 0;
+    uint64_t jitter_ms = 0;
+    uint64_t reordering_delay_ms = 0;
+
     double loss = 0.0;
+    double duplication = 0.0;
+    double corruption = 0.0;
+    double reordering = 0.0;
+
     ArqProtocol protocol = ARQ_STOP_WAIT;
 
     for (int i = 1; i < argc; ++i) {
@@ -175,6 +186,24 @@ int main(int argc, char **argv)
             if (!parse_u64(value, &size)) return 2;
         } else if (strcmp(key, "--loss") == 0) {
             if (!parse_double_pct(value, &loss)) return 2;
+        } else if (strcmp(key, "--duplication") == 0) {
+            if (!parse_double_pct(value, &duplication)) return 2;
+        } else if (strcmp(key, "--corruption") == 0) {
+            if (!parse_double_pct(value, &corruption)) return 2;
+        } else if (strcmp(key, "--reordering") == 0) {
+            if (!parse_double_pct(value, &reordering)) return 2;
+        } else if (strcmp(key, "--delay-ms") == 0) {
+            if (!parse_u64(value, &delay_ms) ||
+                delay_ms > UINT32_MAX) return 2;
+        } else if (strcmp(key, "--jitter-ms") == 0) {
+            if (!parse_u64(value, &jitter_ms) ||
+                jitter_ms > UINT32_MAX) return 2;
+        } else if (strcmp(key, "--reordering-delay-ms") == 0) {
+            if (!parse_u64(value, &reordering_delay_ms) ||
+                reordering_delay_ms > UINT32_MAX) return 2;
+        } else if (strcmp(key, "--rto-ms") == 0) {
+            if (!parse_u64(value, &rto_ms) ||
+                rto_ms < 50 || rto_ms > 2000) return 2;
         } else if (strcmp(key, "--seed") == 0) {
             if (!parse_u64(value, &seed) || seed > UINT32_MAX) return 2;
         } else {
@@ -210,7 +239,7 @@ int main(int argc, char **argv)
     base.protocol = protocol;
     base.window_size = (uint16_t)window_arg;
     base.chunk_size = 512;
-    base.initial_rto_ms = 200;
+    base.initial_rto_ms = rto_ms;
     base.min_rto_ms = 50;
     base.max_rto_ms = 2000;
     base.receive_timeout_ms = 20;
@@ -218,13 +247,13 @@ int main(int argc, char **argv)
     base.max_control_retries = 5;
     base.max_transfer_duration_ms = 120000;
     base.channel.bandwidth_bps = 100000000U;
-    base.channel.delay_ms = 0;
-    base.channel.jitter_ms = 0;
+    base.channel.delay_ms = (uint32_t)delay_ms;
+    base.channel.jitter_ms = (uint32_t)jitter_ms;
     base.channel.loss_probability = loss;
-    base.channel.duplication_probability = 0.0;
-    base.channel.corruption_probability = 0.0;
-    base.channel.reordering_probability = 0.0;
-    base.channel.reordering_delay_ms = 0;
+    base.channel.duplication_probability = duplication;
+    base.channel.corruption_probability = corruption;
+    base.channel.reordering_probability = reordering;
+    base.channel.reordering_delay_ms = (uint32_t)reordering_delay_ms;
     base.channel.queue_limit_bytes = 1024U * 1024U;
     base.channel.random_seed = (uint32_t)seed;
 
