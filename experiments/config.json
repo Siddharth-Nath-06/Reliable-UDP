@@ -1,0 +1,38 @@
+{
+  "output_csv": "transfer_results_v2.csv",
+  "timeout_seconds": 180,
+  "build_command": "make all",
+  "test_command": "make test",
+  "notes": [
+    "Replace the example case command with your actual driver CLI before running.",
+    "Each command must perform one complete sender/receiver transfer and exit.",
+    "The final stdout line may be a JSON object with metrics: packets_sent, retransmissions, timeouts, integrity_ok, goodput_bytes_per_second.",
+    "If sender and receiver are separate processes, create a wrapper script that starts the receiver, runs the sender, waits for both, verifies the received file hash, and prints one JSON metrics line."
+  ],
+  "cases": [
+    {
+      "run_id": "smoke_sw_seed_101",
+      "experiment": "smoke",
+      "protocol": "stop-and-wait",
+      "window_size": 1,
+      "file_size_bytes": 65536,
+      "loss_pct": 0,
+      "duplication_pct": 0,
+      "corruption_pct": 0,
+      "reordering_pct": 0,
+      "delay_ms": 0,
+      "jitter_ms": 0,
+      "seed": 101,
+      "rto_ms": "",
+      "timeout_seconds": 60,
+      "command": [
+        "build/experiment_runner.exe",
+        "--protocol", "{protocol}",
+        "--window", "{window_size}",
+        "--size", "{file_size_bytes}",
+        "--loss", "{loss_pct}",
+        "--seed", "{seed}"
+      ]
+    }
+  ]
+}
