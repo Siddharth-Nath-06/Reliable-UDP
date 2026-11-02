@@ -24,3 +24,13 @@ __pycache__/
 .DS_Store
 Thumbs.db
 '@ | Set-Content -Encoding utf8 .gitignore
+
+# Generated test files
+/tests/test_*.bin
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Temporary files and logs
+*.tmp
