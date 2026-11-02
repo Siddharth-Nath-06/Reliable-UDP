@@ -12,7 +12,7 @@
  *   1. Select Sender.
  *   2. Enter the receiver's IPv4 address.
  *   3. Select a transfer preset.
- *   4. Send a generated dummy file and display statistics.
+ *   4. Choose a file from experiments/ or send a generated test file.
  *
  * IMPORTANT:
  * The current protocol handshake does not negotiate the ARQ protocol.
@@ -40,6 +40,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#endif
+
 #include "../src/driver/driver.h"
 
 #define SENDER_PORT       49171
@@ -49,6 +56,7 @@
 #define DEST_PATH         "experiments/demo_received.bin"
 
 #define DEMO_FILE_SIZE    (32U * 1024U)
+#define EXPERIMENTS_DIR   "experiments"
 #define INPUT_SIZE        256
 
 typedef struct {
@@ -275,6 +283,126 @@ static bool valid_ipv4(const char *ip)
 {
     struct in_addr address;
     return inet_pton(AF_INET, ip, &address) == 1;
+}
+
+/*
+ * If custom-file mode is selected, use the only regular file in experiments/
+ * other than the demo's reserved input/output files. This is portable across
+ * Windows and POSIX platforms.
+ */
+static bool find_only_custom_file(char *path, size_t path_size)
+{
+    char selected[INPUT_SIZE] = "";
+    size_t count = 0;
+
+#ifdef _WIN32
+    WIN32_FIND_DATAA data;
+    HANDLE find_handle = FindFirstFileA("experiments\\*", &data);
+
+    if (find_handle == INVALID_HANDLE_VALUE) {
+        puts("Could not read the experiments directory.");
+        return false;
+    }
+
+    do {
+        if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+        if (strcmp(data.cFileName, "demo_received.bin") == 0 ||
+            strcmp(data.cFileName, "demo_source.bin") == 0)
+            continue;
+
+        ++count;
+        if (strlen(data.cFileName) >= sizeof selected) {
+            FindClose(find_handle);
+            puts("The custom filename is too long.");
+            return false;
+        }
+        strcpy(selected, data.cFileName);
+    } while (FindNextFileA(find_handle, &data));
+
+    FindClose(find_handle);
+#else
+    DIR *directory = opendir(EXPERIMENTS_DIR);
+    if (!directory) {
+        perror("Could not open experiments directory");
+        return false;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(directory)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0 ||
+            strcmp(entry->d_name, "demo_received.bin") == 0 ||
+            strcmp(entry->d_name, "demo_source.bin") == 0)
+            continue;
+
+        char candidate[INPUT_SIZE * 2];
+        int written = snprintf(candidate, sizeof candidate,
+                               "%s/%s", EXPERIMENTS_DIR, entry->d_name);
+        if (written < 0 || (size_t)written >= sizeof candidate)
+            continue;
+
+        struct stat info;
+        if (stat(candidate, &info) != 0 || !S_ISREG(info.st_mode))
+            continue;
+
+        ++count;
+        if (strlen(entry->d_name) >= sizeof selected) {
+            closedir(directory);
+            puts("The custom filename is too long.");
+            return false;
+        }
+        strcpy(selected, entry->d_name);
+    }
+
+    closedir(directory);
+#endif
+
+    if (count == 0) {
+        puts("No custom file found in experiments/.");
+        puts("Place exactly one file there and try again.");
+        return false;
+    }
+
+    if (count > 1) {
+        puts("More than one custom file was found in experiments/.");
+        puts("Leave only the file you want to send (excluding demo_source.bin and demo_received.bin).");
+        return false;
+    }
+
+    int written = snprintf(path, path_size, "%s/%s", EXPERIMENTS_DIR, selected);
+    if (written < 0 || (size_t)written >= path_size) {
+        puts("The custom file path is too long.");
+        return false;
+    }
+
+    return true;
+}
+
+static bool get_file_size(const char *path, uint64_t *size_out)
+{
+    FILE *file = fopen(path, "rb");
+    if (!file) {
+        perror("Could not open input file");
+        return false;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        puts("Could not determine input file size.");
+        return false;
+    }
+
+    long size = ftell(file);
+    fclose(file);
+
+    if (size < 0) {
+        puts("Could not determine input file size.");
+        return false;
+    }
+
+    *size_out = (uint64_t)size;
+    return true;
 }
 
 static bool write_fixture(const char *path, size_t size)
@@ -533,9 +661,36 @@ static bool run_sender(const char *local_ip)
     const Preset *preset = &presets[choice - 1];
 
     const uint32_t seed = 101U;
+    char source_path[INPUT_SIZE * 2];
+    bool generated_fixture = false;
+    long custom_choice;
 
-    if (!write_fixture(SOURCE_PATH, DEMO_FILE_SIZE))
+    puts("\nInput file:");
+    puts("1. Use the only custom file in experiments/");
+    puts("2. Generate and send the demo test file (32 KiB)");
+    if (!read_number("File choice: ", 1, 2, &custom_choice))
         return false;
+
+    if (custom_choice == 1) {
+        if (!find_only_custom_file(source_path, sizeof source_path))
+            return false;
+    } else {
+        if (snprintf(source_path, sizeof source_path, "%s", SOURCE_PATH) >=
+            (int)sizeof source_path) {
+            puts("Source file path is too long.");
+            return false;
+        }
+        if (!write_fixture(source_path, DEMO_FILE_SIZE))
+            return false;
+        generated_fixture = true;
+    }
+
+    uint64_t input_file_size;
+    if (!get_file_size(source_path, &input_file_size)) {
+        if (generated_fixture)
+            (void)remove(source_path);
+        return false;
+    }
 
     DriverConfig config = {0};
     DriverResult result = {0};
@@ -550,7 +705,7 @@ static bool run_sender(const char *local_ip)
     config.receiver_address = receiver_ip;
     config.receiver_port = RECEIVER_PORT;
 
-    config.source_path = SOURCE_PATH;
+    config.source_path = source_path;
     config.progress_callback = progress_callback;
 
     configure_channel(&config, preset, seed);
@@ -559,8 +714,9 @@ static bool run_sender(const char *local_ip)
     printf("Protocol:          %s\n",
            protocol_name(preset->protocol));
     printf("Window size:       %u\n", preset->window);
-    printf("File size:         %u KiB\n",
-           DEMO_FILE_SIZE / 1024U);
+    printf("Input file:        %s\n", source_path);
+    printf("File size:         %" PRIu64 " bytes (%.2f KiB)\n",
+           input_file_size, (double)input_file_size / 1024.0);
     printf("Random seed:       %u\n", seed);
 
     printf("Packet loss:       %.0f%%\n",
@@ -597,7 +753,8 @@ static bool run_sender(const char *local_ip)
         puts("\nTransfer failed. Check the receiver and network configuration.");
     }
 
-    (void)remove(SOURCE_PATH);
+    if (generated_fixture)
+        (void)remove(SOURCE_PATH);
 
     return status == DRIVER_STATUS_OK &&
            result.integrity_verified;
