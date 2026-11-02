@@ -1,0 +1,58 @@
+{
+  "generated_utc": "2026-11-02",
+  "environment": {
+    "platform": "Linux-6.18.57-x86_64-with-glibc2.41",
+    "machine": "x86_64",
+    "python": "3.13.5",
+    "gcc": "gcc (Debian 14.2.0-19) 14.2.0"
+  },
+  "source_scope": "Uploaded source snapshots staged into a temporary tree; not a clean Git checkout",
+  "repository_commit": "not captured; local repository could not be cloned from this environment",
+  "test_results": {
+    "packet_black_box": "PASS",
+    "channel_emulator_unit": "PASS",
+    "arq_rto_unit": "PASS"
+  },
+  "driver_integration": "NOT RUN: required module implementation sources unavailable",
+  "performance_benchmarks": "NOT RUN: full Driver-linked project unavailable; transfer_results.csv intentionally header-only",
+  "source_sha256": {
+    "arq.c": {
+      "sha256": "6b21a5f3b3f0a0821b61a84967f5bb10401774f07ecfa4d9952cebf05c7389ca",
+      "bytes": 22709
+    },
+    "arq.h": {
+      "sha256": "2a6c412557df41f97b7b13816905c510ebf8c28db8a45d2f7604c7143f4b6a39",
+      "bytes": 3858
+    },
+    "channel_emulator.c": {
+      "sha256": "33c5b2a22343e83574e2566c51bb04566509e7f51ba4d8b0b09cf4c15b0218e9",
+      "bytes": 15505
+    },
+    "channel_emulator.h": {
+      "sha256": "b102c6cfc689d8d9cae0dff3efc47d6a8730556b798cb63ac9cabe382bf26194",
+      "bytes": 2997
+    },
+    "packet_module_black_box_test.c": {
+      "sha256": "7fa0d412fdbe0dc56a68951a2c7d53cf8c92d8bb53c362afbe40f06da948b226",
+      "bytes": 7564
+    },
+    "test_channel_emulator.c": {
+      "sha256": "1dee30b4c38eacb673ef5d1d72b63f49d2e9cdbdc22a09ba138f026c83cd556d",
+      "bytes": 17125
+    },
+    "test_arq(1).c": {
+      "sha256": "0cc38e382fe58b58c5568f7d8b03e3c238c0ca28cb40d8c8cd4dcc95685e6e37",
+      "bytes": 21281
+    },
+    "driver_updated.c": {
+      "sha256": "a81f318bbf70ca5d12fd1d76684174fe072cf86556ce0d224e37fd9a41cd8ef5",
+      "bytes": 47583
+    }
+  },
+  "planned_experiments": {
+    "A": "Protocol behaviour as loss increases",
+    "B": "Window-size sweep",
+    "C": "File-size scaling",
+    "D": "Combined impairment and integrity stress"
+  }
+}

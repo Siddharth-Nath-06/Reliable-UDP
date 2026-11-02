@@ -1,0 +1,46 @@
+Reliable UDP experiment preparation — validation log
+Date: 2026-11-02 (UTC date; local run environment)
+Environment: Linux x86_64 container; GCC 14.2.0
+Flags: -std=c11 -Wall -Wextra -Wpedantic -Werror
+
+1) Packet module black-box tests
+Command used after staging sources and correcting only the test include paths:
+gcc -std=c11 -Wall -Wextra -Wpedantic -Werror tests/unit/packet/packet_module_black_box_test.c src/packet/packet_creator.c src/packet/packet_serializer.c src/packet/packet_verifier.c src/packet/packet_checksum.c src/packet/packet_dewrapper.c -o tests/unit/packet/packet_module_black_box_test
+Result:
+packet_receive returned valid = 1
+All packet tests passed.
+
+2) Channel emulator unit tests
+Command:
+gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -pthread tests/unit/channel/test_channel_emulator.c src/channel/channel_emulator.c -lm -o tests/unit/channel/test_channel_emulator
+Result:
+PASS: Outbound delivery and data copying
+PASS: Inbound delivery
+PASS: Packet duplication
+PASS: Packet loss
+PASS: Packet corruption
+PASS: Configured channel delay
+PASS: Packet reordering
+PASS: Queue capacity and rejection
+PASS: Invalid configuration rejection
+All channel emulator tests passed!
+
+3) ARQ and RTO unit tests
+Command used with a temporary test-only POSIX timer shim in place of the supplied Windows-only timer source:
+gcc -std=c11 -Wall -Wextra -Wpedantic -Werror -pthread tests/unit/arq/test_arq.c src/arq/arq.c src/packet/packet_creator.c src/packet/packet_serializer.c src/packet/packet_verifier.c src/packet/packet_checksum.c src/packet/packet_dewrapper.c src/timer/timer_posix_test_shim.c src/rto/rto.c -o tests/unit/arq/test_arq
+Result:
+PASS: ARQ creation validation
+PASS: invalid send inputs
+PASS: Stop-and-Wait sender and retransmission
+PASS: Go-Back-N sender, cumulative ACK and NACK
+PASS: Selective Repeat sender and individual ACKs
+PASS: Stop-and-Wait receiver and duplicate handling
+PASS: Go-Back-N receiver and cumulative ACK handling
+PASS: Selective Repeat receiver, buffering and ordering
+PASS: packet payload ownership
+PASS: ARQ RTT/RTO integration and Karn's algorithm
+PASS: standalone RTO estimator
+All ARQ tests passed.
+
+Important scope note:
+These are module-level validation runs against the available source snapshots, not end-to-end transfer benchmarks. The Driver integration suite and performance experiments were not run because the full set of implementation sources was not available in this workspace. No performance figures are claimed by this log.

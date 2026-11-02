@@ -1,0 +1,2 @@
+run_id,experiment,protocol,window_size,file_size_bytes,loss_pct,duplication_pct,corruption_pct,reordering_pct,delay_ms,jitter_ms,seed,rto_ms,status,elapsed_seconds,goodput_bytes_per_second,packets_sent,retransmissions,timeouts,integrity_ok,exit_code,stdout,stderr
+smoke_sw_seed_101,smoke,stop-and-wait,1,65536,0,0,0,0,0,0,101,,completed,5.728180,11475.398,130,0,0,True,0,"{""packets_sent"":130,""retransmissions"":0,""timeouts"":0,""integrity_ok"":true,""goodput_bytes_per_second"":11475.398,""exit_code"":0}",sender: Success; receiver: Success; files_equal: true
