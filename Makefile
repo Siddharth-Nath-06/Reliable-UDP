@@ -126,5 +126,13 @@ test: $(TESTS)
 	done
 	@echo ""; echo "ALL UNIT TESTS PASSED"
 
+DEMO_TARGET := $(BUILD)/reliable_udp_demo$(EXE)
+
+$(DEMO_TARGET): demo/demo.c $(SRC) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREADS) $^ $(LDLIBS) -o $@
+
+.PHONY: demo
+demo: $(DEMO_TARGET)
+
 clean:
 	rm -rf $(BUILD)
