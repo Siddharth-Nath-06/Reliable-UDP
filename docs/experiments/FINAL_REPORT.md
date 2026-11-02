@@ -29,7 +29,7 @@ These results support comparisons for this implementation under the configured c
 | Corruption | 9 |
 | Combined impairment | 9 |
 
-The CSV’s `stdout` and `stderr` fields are retained as run-level evidence. The raw input should remain unchanged; derived outputs are stored separately.
+The CSV's `stdout` and `stderr` fields are retained as run-level evidence. The raw input should remain unchanged; derived outputs are stored separately.
 
 ## Main observations
 
@@ -45,6 +45,10 @@ Goodput is reported in bytes per second. The values below are **medians across t
 
 In this no-impairment configuration, Go-Back-N and Selective Repeat have very similar median goodput and both exceed Stop-and-Wait. This is a result for the tested file size and emulator settings, not a general performance guarantee.
 
+![Baseline scenario: mean goodput and standard deviation](../../results/analysis/plots/baseline_goodput.png)
+
+[Open baseline goodput plot](../../results/analysis/plots/baseline_goodput.png)
+
 ### Packet-loss sensitivity
 
 | Configured loss | Stop-and-Wait | Go-Back-N | Selective Repeat |
@@ -54,6 +58,10 @@ In this no-impairment configuration, Go-Back-N and Selective Repeat have very si
 | 10% | 8,021 | 10,989 | 10,935 |
 
 Entries are median goodput in bytes/s (n=3 per protocol/loss point). Median goodput falls as configured loss rises for all three protocols. At 10% loss, Go-Back-N and Selective Repeat have similar median goodput in this sample.
+
+![Loss sensitivity: mean goodput and standard deviation](../../results/analysis/plots/loss_sensitivity.png)
+
+[Open loss sensitivity plot](../../results/analysis/plots/loss_sensitivity.png)
 
 ### Window-size sweep
 
@@ -66,9 +74,41 @@ Entries are median goodput in bytes/s (n=3 per protocol/loss point). Median good
 
 Entries are median goodput in bytes/s (n=3 per protocol/window). The tested larger windows substantially improve median goodput compared with window size 1, with smaller gains from 8 to 16. These runs use a 262,144-byte payload, unlike the 65,536-byte payload used by the other groups, so do not directly compare their absolute goodput with the other experiment groups.
 
+![Window-size sweep: mean goodput and standard deviation](../../results/analysis/plots/window_sweep.png)
+
+[Open window-size sweep plot](../../results/analysis/plots/window_sweep.png)
+
 ### Combined impairment
 
 Median goodput was 2,961 bytes/s for Stop-and-Wait, 2,197 bytes/s for Go-Back-N, and 7,088 bytes/s for Selective Repeat. The median retransmission and timeout counts were 14/14, 267/68, and 14/14 respectively. The high Go-Back-N recovery counts and lower goodput are consistent with the cost of retransmitting later packets after a loss within a window; this is an interpretation of the observed data, not proof of a single cause.
+
+![Combined impairment scenario: mean goodput and standard deviation](../../results/analysis/plots/combined_goodput.png)
+
+[Open combined impairment plot](../../results/analysis/plots/combined_goodput.png)
+
+### Corruption
+
+The corruption experiment evaluates protocol goodput under the configured packet-corruption conditions. The plotted values show the mean and standard deviation across three runs per protocol.
+
+![Corruption scenario: mean goodput and standard deviation](../../results/analysis/plots/corruption_goodput.png)
+
+[Open corruption plot](../../results/analysis/plots/corruption_goodput.png)
+
+### Duplication
+
+The duplication experiment evaluates protocol goodput under the configured packet-duplication conditions. The plotted values show the mean and standard deviation across three runs per protocol.
+
+![Duplication scenario: mean goodput and standard deviation](../../results/analysis/plots/duplication_goodput.png)
+
+[Open duplication plot](../../results/analysis/plots/duplication_goodput.png)
+
+### Reordering
+
+The reordering experiment evaluates protocol goodput under the configured packet-reordering conditions. The plotted values show the mean and standard deviation across three runs per protocol.
+
+![Reordering scenario: mean goodput and standard deviation](../../results/analysis/plots/reordering_goodput.png)
+
+[Open reordering plot](../../results/analysis/plots/reordering_goodput.png)
 
 ### Other impairment groups
 
@@ -90,15 +130,3 @@ Run the analysis script with Python 3, pandas, and matplotlib:
 
 ```bash
 python analyze_results.py transfer_campaign_final.csv --out results/analysis
-```
-
-The script validates the input, emits summary CSVs and JSON validation, and regenerates plots. The original CSV is not modified.
-
-## Files
-
-- `summaries/validation.json` — structural and run-status validation.
-- `summaries/summary_by_experiment_protocol.csv` — grouped descriptive statistics.
-- `summaries/loss_sensitivity.csv` — loss-level comparison.
-- `summaries/window_sweep.csv` — window-size comparison.
-- `summaries/recovery_metrics.csv` — packet/recovery metrics.
-- `plots/` — generated goodput figures.
