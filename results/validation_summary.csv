@@ -1,6 +1,0 @@
-suite,source_scope,compiler_flags,result,tests_reported,caveat
-packet_black_box,available packet module snapshot,"-std=c11 -Wall -Wextra -Wpedantic -Werror",PASS,"All packet tests passed",Snapshot source was staged from uploaded files; not a clean checkout build
-channel_emulator_unit,available channel emulator snapshot,"-std=c11 -Wall -Wextra -Wpedantic -Werror -pthread -lm",PASS,"9 named tests passed",Snapshot source was staged from uploaded files; not a clean checkout build
-arq_and_rto_unit,available ARQ/RTO snapshot,"-std=c11 -Wall -Wextra -Wpedantic -Werror -pthread",PASS,"11 named tests passed",Used a temporary POSIX timer shim because the provided timer implementation is Windows-specific; not a production timer test
-full_driver_integration,full repository sources,not run,NOT_RUN,0,"Monitor, File Manager, and Reconstructor implementation sources were unavailable in this workspace"
-performance_experiments,full repository sources,not run,NOT_RUN,0,"No transfer benchmark numbers have been generated; transfer_results.csv is intentionally header-only"
