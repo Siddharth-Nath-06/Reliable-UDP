@@ -129,7 +129,7 @@ test: $(TESTS)
 DEMO_TARGET := $(BUILD)/reliable_udp_demo$(EXE)
 
 $(DEMO_TARGET): demo/demo.c $(SRC) | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREADS) $^ $(LDLIBS) -o $@
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(THREADS) $^ $(LDLIBS) -static -o $@
 
 .PHONY: demo
 demo: $(DEMO_TARGET)
