@@ -2,11 +2,13 @@
 
 ## Current state
 
-The repository provides a GCC/Make build, unit-test targets, and a C-based experiment runner at `experiments/experiment_runner.c`.
+The repository provides a GCC/Make build, test targets, a C experiment runner at `experiments/experiment_runner.c`, and a Python campaign runner at `experiments/run_experiments.py`.
 
-The runner performs one complete sender/receiver transfer, checks the resulting files, and prints a final JSON metrics line. The Python script `experiments/run_experiments.py` reads cases from `experiments/config.json`, executes the configured command for each case, parses the JSON metrics, and appends a row to the configured CSV file under `results/`.
+The C runner performs a sender/receiver transfer, checks the resulting files, and emits a final JSON metrics line. The Python runner reads cases from `experiments/config.json`, executes the configured command for each case, parses available JSON metrics, and writes one CSV row per executed case.
 
-The Stop-and-Wait smoke case has been run successfully with a 65,536-byte file, no configured packet loss, and seed `101`. The sender and receiver reported success, the files matched, integrity was verified, and the runner produced positive goodput. This confirms the basic harness path; it does not yet validate all protocols or impairment settings.
+The configured final campaign contains 96 cases across seven groups: baseline protocol comparison, packet-loss sensitivity, window-size sweep, reordering sensitivity, duplication sensitivity, corruption sensitivity, and combined impairments. The intended output is `results/raw/transfer_campaign_final.csv`.
+
+The Stop-and-Wait smoke test has passed for a 65,536-byte file with no configured packet loss, using seeds `101` and `202`. Both runs completed, reported integrity as `True`, and returned exit code `0`. This validates the basic harness path for those two baseline runs only; it does not by itself validate all protocols or impairment settings.
 
 ## Prerequisites
 
@@ -31,15 +33,15 @@ Run the PowerShell prechecker directly:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\experiments\precheck.ps1
 ```
 
-Or ask the experiment runner to perform the precheck and then print the first configured case without executing it:
+Or run the precheck and preview the first configured case:
 
 ```powershell
 python .\experiments\run_experiments.py --precheck --dry-run --limit 1
 ```
 
-A failed build or test should block experiments. Investigate test failures rather than weakening tests to make the precheck pass.
+A failed build or test should block the campaign. Investigate test failures rather than weakening tests to make the precheck pass.
 
-## Run the C experiment harness directly
+## Build and run the C experiment harness directly
 
 Build the runner:
 
@@ -53,53 +55,85 @@ Example: a 65,536-byte Stop-and-Wait transfer with no configured loss and a fixe
 .\build\experiment_runner.exe --protocol stop-and-wait --window 1 --size 65536 --loss 0 --seed 101
 ```
 
-The runner reports sender/receiver status and file equality, followed by a JSON summary containing metrics such as packets sent, retransmissions, timeouts, integrity status, goodput, and exit code. Treat a transfer as successful only when the process result and integrity/file-equality checks both indicate success.
+The runner reports transfer status and file equality, followed by JSON metrics such as packets sent, retransmissions, timeouts, integrity status, goodput, and exit code. Treat a transfer as successful only when both the process result and integrity/file-verification checks support success.
 
-## Run configured experiments
+## Configured campaign
 
-The experiment cases and output filename are configured in `experiments/config.json`. The current smoke case invokes `build/experiment_runner.exe` with the protocol, window size, file size, loss setting, and seed.
+The cases and output filename are defined in `experiments/config.json`. The current case generator creates 96 cases, with seeds `101`, `202`, and `303` per configuration. The campaign covers:
 
-Run the first configured case:
+- Baseline comparison of SW, GBN, and SR
+- Loss rates of 1%, 5%, and 10%
+- GBN/SR window sizes 1, 4, 8, and 16
+- Isolated reordering, duplication, and corruption
+- A combined-impairment robustness group
+
+See `docs/experiments/EXPERIMENT_PLAN.md` for the detailed matrix and interpretation rules.
+
+### Syntax check and dry run
+
+From the repository root:
 
 ```powershell
-python .\experiments\run_experiments.py --limit 1
+python -m py_compile .\experiments\run_experiments.py
+python .\experiments\run_experiments.py --dry-run --limit 2
 ```
 
-Run all configured cases (after reviewing the configuration):
+The dry run prints the commands without executing them. **The current runner reserves the output CSV path before processing cases**, so a dry run can leave an empty CSV file. Remove that empty file before starting a real campaign.
+
+### Smoke test
+
+A real smoke test can be run using the first two configured cases:
+
+```powershell
+python .\experiments\run_experiments.py --limit 2
+```
+
+The runner refuses to reuse a non-empty output CSV. Preserve the smoke-test file under a separate name before starting the full campaign. For example, if the smoke-test CSV is at the configured final path:
+
+```powershell
+Rename-Item .\results\raw\transfer_campaign_final.csv transfer_campaign_smoke.csv
+```
+
+Then start the full campaign:
 
 ```powershell
 python .\experiments\run_experiments.py
 ```
 
-Preview commands without executing them:
+Do not run the rename command if the destination `transfer_campaign_smoke.csv` already exists; choose another unique backup name instead. If the configured output CSV already exists and is non-empty, the runner stops rather than appending new results to it.
 
-```powershell
-python .\experiments\run_experiments.py --dry-run --limit 1
-```
+### Dry-run caution
 
-The runner appends results to the CSV named by `output_csv` in `experiments/config.json`, under `results/`. Use a new output filename when changing the CSV schema; the script does not migrate an existing CSV header. For example, the current smoke-test results can be written to `results/transfer_results_v2.csv` to avoid mixing the newer schema with an older results file.
+The runner's dry-run mode does not execute experiment commands or write result rows, but it does reserve the output file by opening it and writing the CSV header. Therefore, after a dry run, remove the empty/header-only output file before a real run. Do not remove a file containing real results.
+
+## Results CSV
+
+The configured output is `results/raw/transfer_campaign_final.csv`. Its columns include case parameters, status, elapsed time, goodput, packet/retransmission/timeout metrics, integrity status, exit code, and captured output. The schema includes `reordering_delay_ms`.
+
+The runner creates parent directories for the output path. It does not overwrite a non-empty output file; preserve previous data and choose a fresh path for a new campaign. Inspect the CSV header and row count before analysis.
 
 ## Interpreting results
 
 - Inspect `status`, `exit_code`, and `integrity_ok` before analyzing performance.
-- Do not count failed, launch-error, or timed-out runs as successful transfers.
-- Check the received-file integrity result; an exit code of zero alone is not enough.
-- Use a fixed random seed when comparing runs so the configured channel randomness is reproducible.
-- Compare repeated runs and record the protocol, window size, file size, channel settings, and seed.
-- Goodput and packet metrics are only meaningful if the transfer and integrity checks succeeded.
-- The channel-emulator configuration is applied on the sender's transport path in the current harness. Interpret loss and other impairment results with that scope in mind; do not assume both directions are impaired symmetrically.
+- Report failed, timed-out, and launch-error cases; do not count them as successful transfers.
+- An exit code of zero alone is not enough: check the integrity/file-verification result too.
+- Goodput and packet metrics should only be used as successful-transfer performance measurements when integrity verification passed.
+- Compare repeated seeds and retain protocol, window size, file size, channel settings, and seed alongside each measurement.
+- The configured impairment settings describe the emulator; do not assume they affect both directions symmetrically unless confirmed in the implementation.
+- Treat the campaign as evidence about this implementation and these configured conditions, not as a universal ranking of reliable transport protocols.
 
-## Recommended validation before a large benchmark batch
+## After the campaign
 
-1. Run the loss-free smoke test and confirm the sender and receiver succeed, the files match, integrity is true, and goodput is positive.
-2. Add smoke cases for Go-Back-N and Selective Repeat, using protocol-valid window sizes.
-3. Test a larger file without impairments.
-4. Test a fixed-seed loss case and confirm that retransmission and timeout metrics behave plausibly while the transfer still passes integrity checks.
-5. Only then expand the experiment matrix and analyze performance.
+1. Confirm that the full run finished and that the CSV contains the expected 96 rows plus one header row.
+2. Check status counts, exit codes, integrity results, and missing metrics.
+3. Preserve the raw CSV unchanged.
+4. Generate summary tables and plots from the raw data with a reproducible analysis script.
+5. Record the commit and execution environment.
+6. Update the README with links and conclusions only after the data has been validated and analyzed.
 
-## Results and repository hygiene
+## Repository hygiene
 
-- Experiment output is appended; repeated runs accumulate rows.
-- Preserve previous result files when changing schemas or experiment configurations.
-- Review failed and timed-out rows rather than silently discarding them.
+- Keep raw campaign data separate from smoke-test output.
+- Preserve previous result files when changing experiment configurations or schemas.
+- Review failures instead of silently discarding them.
 - Avoid committing generated binaries or temporary transfer files unless the repository intentionally tracks them.
